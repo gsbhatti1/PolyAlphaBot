@@ -22,12 +22,17 @@ def set_last_error(msg: str):
     LAST_ERROR = (msg or "")[-1000:]  # keep last 1000 chars
 
 def _db_scalar(query: str, params=()):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(query, params)
-    row = cur.fetchone()
-    conn.close()
-    return row[0] if row else 0
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        cur.execute(query, params)
+        row = cur.fetchone()
+        conn.close()
+        return row[0] if row else 0
+    except Exception as e:
+        # return a sentinel and store error for /status
+        set_last_error(f"DB error: {repr(e)} | DB_PATH={DB_PATH}")
+        return 0
 
 def build_status_text() -> str:
     now = int(time.time())
