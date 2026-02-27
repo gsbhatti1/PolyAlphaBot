@@ -168,3 +168,4 @@ ORDER BY closed_at DESC LIMIT 20;
 - **API rate limits.** The scanner throttles requests (0.4s delay). Scanning 500 wallets takes ~10 min.
 - **Binary Sharpe.** The Sharpe ratio is adapted for binary outcomes but isn't a perfect analog to traditional Sharpe.
 - **Not financial advice.** This is a research tool. Paper trade extensively before considering real capital.
+# auto-push test Fri Feb 27 09:09:44 PM UTC 2026
