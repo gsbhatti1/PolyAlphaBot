@@ -169,3 +169,4 @@ ORDER BY closed_at DESC LIMIT 20;
 - **Binary Sharpe.** The Sharpe ratio is adapted for binary outcomes but isn't a perfect analog to traditional Sharpe.
 - **Not financial advice.** This is a research tool. Paper trade extensively before considering real capital.
 # auto-push test Fri Feb 27 09:09:44 PM UTC 2026
+# auto-push test Fri Feb 27 09:12:58 PM UTC 2026
