@@ -108,6 +108,13 @@ def main():
     app.add_handler(CommandHandler("status", cmd_status))
     app.add_handler(CommandHandler("report", cmd_report))
 
+	# ---- Add this block ----
+	async def on_error(update, context):
+	    set_last_error(repr(context.error))
+
+	app.add_error_handler(on_error)
+	# ------------------------
+
     app.run_polling(close_loop=False)
 
 if __name__ == "__main__":
