@@ -347,7 +347,7 @@ async def run_monitor(
     db.init_db(conn)
 
     # Load wallets from DB (from scanner output)
-    wallets = db.get_top_wallets(conn, limit=max_wallets)
+    wallets = db.get_active_wallets(conn, limit=max_wallets)
 
     # Add any manually specified wallets
     for addr in extra_wallets:
