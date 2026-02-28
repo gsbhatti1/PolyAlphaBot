@@ -62,6 +62,10 @@ def telegram_heartbeat(text: str) -> None:
 console = Console()
 logger = logging.getLogger('polymarket-bot')
 logging.basicConfig(level=logging.INFO)
+
+# Quiet noisy httpx INFO logs
+logging.getLogger('httpx').setLevel(logging.WARNING)
+logging.getLogger('httpcore').setLevel(logging.WARNING)
 RUNNING = True
 
 
