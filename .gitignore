@@ -20,3 +20,28 @@ venv/
 .DS_Store
 *.swp
 *.swo
+
+# env / python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pytest_cache/
+
+# local state / db
+*.db
+*.db-wal
+*.db-shm
+
+# secrets
+.env
+*.key
+*.pem
+
+# logs & temp
+*.log
+*.bak*
+*.auto_*
+autoload_patch.py
+build_v2.py
+upgrade_v2_engine.py
