@@ -40,6 +40,12 @@ import db
 import poly_api
 import alerts
 from paper_trader import PaperTrader
+
+# ── Autonomous maintenance defaults (override in config.py if you want)
+DEAD_WALLET_DAYS = getattr(config, 'DEAD_WALLET_DAYS', 5)
+MAINTENANCE_EVERY_SEC = getattr(config, 'MAINTENANCE_EVERY_SEC', 3600)
+REFILL_FROM_INACTIVE = getattr(config, 'REFILL_FROM_INACTIVE', True)
+
 def telegram_heartbeat(text: str) -> None:
     try:
         print("[telegram] heartbeat: sync", file=sys.stderr)
@@ -314,6 +320,20 @@ async def check_resolutions(
             except Exception as e:
                 logger.warning(f"[telegram] send win/loss failed: {e!r}")
 
+async def run_maintenance(conn, max_wallets: int):
+    """Prune dead wallets and refill to max_wallets. Returns (pruned, added, active_count)."""
+    pruned = db.prune_dead_wallets(conn, DEAD_WALLET_DAYS)
+    added = []
+    if REFILL_FROM_INACTIVE:
+        row = conn.execute("SELECT COUNT(*) AS n FROM wallets WHERE is_active=1").fetchone()
+        active_count = int(row["n"]) if row else 0
+        need = max(0, int(max_wallets) - int(active_count))
+        if need > 0:
+            added = db.activate_best_inactive(conn, need)
+    row = conn.execute("SELECT COUNT(*) AS n FROM wallets WHERE is_active=1").fetchone()
+    active_count = int(row["n"]) if row else 0
+    return pruned, added, active_count
+
 async def run_monitor(
     max_wallets: int,
     interval: int,
@@ -402,6 +422,31 @@ async def run_monitor(
                         pass
 
                 conn.commit()
+
+                  # ── Autonomous maintenance (timestamp-based)
+                  now = time.time()
+                  if now >= next_maintenance_ts:
+                      try:
+                          pruned, added, active_n = await run_maintenance(conn, max_wallets)
+                          conn.commit()
+                          wallets = db.get_active_wallets(conn, limit=max_wallets)
+                          if pruned or added:
+                              text = (
+                                  f"🧹 Wallet maintenance
+"
+                                  f"Pruned: {len(pruned)} (>{DEAD_WALLET_DAYS}d inactive)
+"
+                                  f"Added: {len(added)}
+"
+                                  f"Active watching: {len(wallets)}/{max_wallets}"
+                              )
+                              try:
+                                  alerts.send_telegram_sync(text)
+                              except Exception:
+                                  pass
+                      except Exception:
+                          pass
+                      next_maintenance_ts = now + MAINTENANCE_EVERY_SEC
 
                 live.update(
                     build_dashboard(wallets, recent_trades, paper, poll_count, last_poll)
