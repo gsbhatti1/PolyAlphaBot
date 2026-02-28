@@ -233,18 +233,22 @@ async def poll_wallet(
         else:
             logger.info("[PAPER_DEBUG] paper trader is OFF (paper=None)")
         # Send alerts
-        paper_action = {"size_usd": paper_size, "kelly_fraction": 0,
-                         "bankroll": paper.bankroll} if paper and paper_size else None
-    msg = alerts.format_new_trade_alert(wallet, trade_record, paper_action)
-    # Send Telegram alert for the new trade
-    try:
-     alerts.send_telegram_sync(msg)
-    except Exception as e:
-        logger.warning(f"[telegram] send trade alert failed: {e!r}")
-    try:
+        # Send alerts
+        paper_action = {
+            "size_usd": paper_size,
+            "kelly_fraction": 0,
+            "bankroll": paper.bankroll,
+        } if paper and paper_size else None
+
+        msg = alerts.format_new_trade_alert(wallet, trade_record, paper_action)
+
+        # Send Telegram alert for the new trade
+        try:
             alerts.send_telegram_sync(msg)
-    except Exception as e:
+        except Exception as e:
             logger.warning(f"[telegram] send trade alert failed: {e!r}")
+
+
 
     return new_trades
 
