@@ -279,7 +279,22 @@ async def check_resolutions(
                         resolved[slug] = 0.0
 
     if resolved:
-        paper.check_resolutions(resolved)
+        	closed = paper.check_resolutions(resolved) or []
+	for c in closed:
+   	# build a clear message
+   	 pnl = c.get("pnl", 0)
+    	outcome = "✅ WIN" if pnl >= 0 else "❌ LOSS"
+    	text = (
+       		f"{outcome} ${pnl:+.2f}\n"
+        	f"{c.get('market_question','')}\n"
+        	f"Outcome: {c.get('outcome','')}  Side: {c.get('side','')}\n"
+       		f"Size: ${c.get('size_usd',0):,.0f} @ {c.get('entry_price','?')} → {c.get('exit_price','?')}\n"
+        	f"Bankroll: ${c.get('bankroll','')}"
+    	)
+   	 try:
+       	 alerts.send_telegram_sync(text)
+    	except Exception as e:
+	        logger.warning(f"[telegram] send result failed: {e!r}")
 
 
 async def run_monitor(
