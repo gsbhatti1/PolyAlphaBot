@@ -262,6 +262,7 @@ async def poll_wallet(
     return new_trades
 
 
+
 async def check_resolutions(
     client: httpx.AsyncClient,
     conn,
@@ -298,9 +299,10 @@ async def check_resolutions(
 
     if resolved:
         closed = paper.check_resolutions(resolved) or []
+
         for c in closed:
             pnl = float(c.get("pnl", 0))
-            outcome_tag = "✅ WIN" if pnl >= 0 else "❌ LOSS"
+            outcome_tag = "WIN" if pnl >= 0 else "LOSS"
             market = (c.get("market_question") or "")[:160]
             side = c.get("side", "?")
             outcome = c.get("outcome", "?")
@@ -316,10 +318,11 @@ async def check_resolutions(
 "
                 f"{side} {outcome} | Size ${size:,.0f}
 "
-                f"Entry {entry} → Exit {exitp}
+                f"Entry {entry} -> Exit {exitp}
 "
                 f"Bankroll: ${bankroll:,.2f}"
             )
+
             try:
                 alerts.send_telegram_sync(text)
             except Exception as e:
@@ -327,6 +330,7 @@ async def check_resolutions(
 
 
 async def run_monitor(
+
 
 
     max_wallets: int,
