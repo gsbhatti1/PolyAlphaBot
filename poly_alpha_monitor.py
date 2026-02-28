@@ -214,12 +214,11 @@ async def poll_wallet(
             continue
 
         # Paper trade
-        # Paper trade
         paper_size = 0
         if paper:
             alpha = wallet.get("alpha", wallet.get("score", wallet.get("alpha_score")))
-        wallet_metrics = {"alpha": alpha}
-        sizing = paper.size_trade(wallet_metrics, trade)
+            wallet_metrics = {"alpha": alpha}
+            sizing = paper.size_trade(wallet_metrics, trade)
             logger.info("[PAPER_DEBUG] sizing=%s wallet_keys=%s", sizing, list(wallet.keys()))
             if sizing:
                 paper.open_position(wallet, trade_record, sizing)
@@ -229,7 +228,6 @@ async def poll_wallet(
                 logger.info("[PAPER_DEBUG] sizing is None/false -> skipped paper trade")
         else:
             logger.info("[PAPER_DEBUG] paper trader is OFF (paper=None)")
-
         # Send alerts
         paper_action = {"size_usd": paper_size, "kelly_fraction": 0,
                          "bankroll": paper.bankroll} if paper and paper_size else None
