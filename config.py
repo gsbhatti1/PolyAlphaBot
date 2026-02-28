@@ -11,39 +11,33 @@ DATA_API = "https://data-api.polymarket.com"
 # CLOB API — order book (not used in scanner)
 CLOB_API = "https://clob.polymarket.com"
 
-# ── Scanner Defaults ───────────────────────────────────────────────────────
-DEFAULT_SCAN_LIMIT = 200          # wallets to pull from leaderboard
-MIN_PNL = 500                     # minimum PnL in USD
-MIN_TRADES = 15                   # minimum number of resolved markets
-MIN_WIN_RATE = 0.52               # better than coin flip
-MAX_AVG_BET = 50_000              # filter out whale wallets
-MIN_ACTIVE_DAYS = 14              # minimum days between first and last trade
-TOP_VOLUME_EXCLUDE = 500          # exclude top N by volume (too visible)
+# ── Aggressive Mode Toggle ────────────────────────────────────────────────
+AGGRESSIVE_MODE = True
 
-# ── Alpha Score Weights ────────────────────────────────────────────────────
-SCORE_WEIGHTS = {
-    "pnl_magnitude":     0.20,
-    "win_rate":          0.20,
-    "profit_factor":     0.15,
-    "sharpe_ratio":      0.15,
-    "consistency":       0.10,
-    "recency":           0.10,
-    "inverse_visibility": 0.10,
-}
+# ── Scanner Defaults ───────────────────────────────────────────────────────
+DEFAULT_SCAN_LIMIT = 1000         # more wallets
+MIN_PNL = 0                       # don't filter by pnl initially
+MIN_TRADES = 1                    # include new wallets
+MIN_WIN_RATE = 0.49               # basically allow everyone
+MAX_AVG_BET = 500_000             # allow whales for now
+MIN_ACTIVE_DAYS = 1               # allow recent
+TOP_VOLUME_EXCLUDE = 0            # include visible wallets for action
 
 # ── Monitor Defaults ───────────────────────────────────────────────────────
-POLL_INTERVAL = 30                # seconds between polls
-MAX_WATCH_WALLETS = 20            # max wallets to monitor
-MIN_TRADE_SIZE = 50               # minimum trade size to alert on (USD)
+POLL_INTERVAL = 5                 # faster polling
+MAX_WATCH_WALLETS = 150           # monitor more wallets
+MIN_TRADE_SIZE = 5                # catch small trades
 
 # ── Paper Trader Defaults ──────────────────────────────────────────────────
-STARTING_BANKROLL = 10_000        # paper trading bankroll
-DEFAULT_KELLY_FRACTION = 0.25     # quarter-Kelly for safety
-MAX_POSITION_PCT = 0.10           # max 10% of bankroll per trade
+STARTING_BANKROLL = 10_000
+DEFAULT_KELLY_FRACTION = 1.0      # full Kelly (paper only)
+MAX_POSITION_PCT = 0.35           # up to 35% per trade (paper only)
+
+# ── Rate Limiting ──────────────────────────────────────────────────────────
+REQUEST_DELAY = 0.1
+MAX_RETRIES = 5
 
 # ── Alerts ─────────────────────────────────────────────────────────────────
-# ── Alerts ─────────────────────────────────────────────────────────────────
-# Alerts
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
