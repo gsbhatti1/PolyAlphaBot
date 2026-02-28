@@ -21,6 +21,7 @@ import json
 import signal
 import sys
 import time
+import logging
 from pathlib import Path
 from datetime import datetime
 
@@ -54,6 +55,8 @@ def telegram_heartbeat(text: str) -> None:
         print(f"[telegram] heartbeat failed: {e!r}", file=sys.stderr)
 
 console = Console()
+logger = logging.getLogger('polymarket-bot')
+logging.basicConfig(level=logging.INFO)
 RUNNING = True
 
 
