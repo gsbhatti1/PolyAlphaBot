@@ -311,7 +311,7 @@ async def check_resolutions(
         size = float(c.get("size_usd", 0))
         entry = c.get("entry_price", "?")
         exitp = c.get("exit_price", "?")
-        bankroll = c.get("bankroll", 0)
+    bankroll = c.get("bankroll", 0)
 
         text = (
             f"{outcome_tag}  P&L ${pnl:+.2f}
