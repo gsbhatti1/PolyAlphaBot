@@ -58,3 +58,8 @@ MAX_RETRIES = 5
 DEAD_WALLET_DAYS = 5                 # prune wallets if no trades for N days
 MAINTENANCE_EVERY_SEC = 3600         # run maintenance every hour
 REFILL_FROM_INACTIVE = True          # refill from inactive wallets already in DB
+
+# ── Scanner auto-refresh ─────────────────────────────────────────────────────
+SCAN_REFRESH_EVERY_SEC = 21600   # 6 hours
+SCAN_LIMIT = 1000                # leaderboard entries to scan
+SCANNER_SCRIPT = "poly_alpha_scanner.py"
