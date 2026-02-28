@@ -34,6 +34,9 @@ class PaperTrader:
         self.conn = conn
         self.bankroll = bankroll or config.STARTING_BANKROLL
         self._load_state()
+        self.last_skip_reason = None
+        self.cap_block_until = 0
+        self._last_throttle_log_ts = 0
 
     def _load_state(self):
         """Resume from last ledger snapshot if available."""
@@ -42,6 +45,20 @@ class PaperTrader:
         ).fetchone()
         if row:
             self.bankroll = row["bankroll"]
+
+
+    def _log_outbox(self, mode, market_slug, side, outcome, order_type, size_usd, status, error=None, payload="{}"):
+        """Best-effort outbox logging; must never break execution."""
+        try:
+            self.conn.execute(
+                """
+                INSERT INTO order_outbox (ts, mode, market_slug, side, outcome, order_type, size_usd, payload, status, error)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
+                """,
+                (time.time(), mode, market_slug, side, outcome, order_type, float(size_usd), payload or "{}", status, error),
+            )
+        except Exception:
+            pass
 
     # ── Kelly Criterion ────────────────────────────────────────────────────
 
@@ -133,6 +150,26 @@ class PaperTrader:
 
     def open_position(self, wallet: dict, trade: dict, sizing: dict) -> int:
         """Open a paper position mirroring a detected trade."""
+        self.last_skip_reason = None
+        mode = getattr(config, 'EXECUTION_MODE', 'PAPER')
+        # cap throttle (prevents outbox spam when exposure cap is hit)
+        throttle_sec = int(getattr(config, "CAP_THROTTLE_SEC", 60))
+        now = time.time()
+
+        # compute key fields early so we can log throttle skips without writing an 'attempt'
+        _slug = trade.get("market_slug", trade.get("slug", trade.get("market", "")))
+        _outcome = trade.get("outcome", "")
+        _side = trade.get("side", "")
+        _size = float(sizing.get("size_usd") or 0)
+
+        if now < getattr(self, "cap_block_until", 0):
+            self.last_skip_reason = "cap_throttle_active"
+            log_every = int(getattr(config, "THROTTLE_LOG_EVERY_SEC", 60))
+            if (now - getattr(self, "_last_throttle_log_ts", 0)) >= log_every:
+                self._log_outbox(mode, _slug, _side, _outcome, "MARKET", _size, status="skipped", error=self.last_skip_reason)
+                self._last_throttle_log_ts = now
+            return -1
+
         pos = {
             "wallet_address": wallet["address"],
             "market_slug": trade.get("market_slug", trade.get("slug", trade.get("market", ""))),
@@ -145,12 +182,17 @@ class PaperTrader:
             "opened_at": time.time(),
         }
 
+        # Log every attempt (even if skipped)
+        self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"], "MARKET", pos["size_usd"], status="attempt")
+
         # Duplicate guard: skip if already open for same market/outcome/side
         row_dup = self.conn.execute(
             "SELECT id FROM paper_positions WHERE (closed_at IS NULL OR closed_at=0) AND market_slug=? AND outcome=? AND side=? LIMIT 1",
             (pos["market_slug"], pos.get("outcome",""), pos.get("side","")),
         ).fetchone()
         if row_dup:
+            self.last_skip_reason = "duplicate_open_position"
+            self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"], "MARKET", pos["size_usd"], status="skipped", error=self.last_skip_reason)
             return -1
 
         # ── Institutional risk caps ─────────────────────────────
@@ -165,20 +207,29 @@ class PaperTrader:
         exp_open = float(row["exp"]) if row and row["exp"] is not None else 0.0
 
         if n_open >= max_open_pos:
+            self.last_skip_reason = "cap_max_open_positions"
+            self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"], "MARKET", pos["size_usd"], status="skipped", error=self.last_skip_reason)
             return -1
         if (exp_open + float(sizing["size_usd"])) > max_open_exp:
+            self.last_skip_reason = f"cap_max_open_exposure exp={exp_open:.2f} add={float(sizing['size_usd']):.2f} max={max_open_exp:.2f}"
+            self.cap_block_until = time.time() + 60
+            self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"], "MARKET", pos["size_usd"], status="skipped", error=self.last_skip_reason)
             return -1
 
         try:
             with db.transaction(self.conn):
                 pos_id = db.open_paper_position(self.conn, pos)
-                self.bankroll -= sizing["size_usd"]
+                # NOTE: bankroll represents equity; do NOT subtract on open (prevents fake decay)
                 db.snapshot_ledger(self.conn, self.bankroll)
         except Exception as e:
             # If unique index blocks duplicates, just skip silently
             if 'uq_open_pos_market_outcome_side' in str(e) or 'UNIQUE constraint failed' in str(e):
+                self.last_skip_reason = "duplicate_unique_index"
+                self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"], "MARKET", pos["size_usd"], status="skipped", error=self.last_skip_reason)
                 return -1
             raise
+
+        self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"], "MARKET", pos["size_usd"], status="opened")
 
         return pos_id
 
