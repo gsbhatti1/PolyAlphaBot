@@ -245,6 +245,7 @@ def insert_trade(conn: sqlite3.Connection, trade: dict) -> bool:
                 :side, :size_usd, :price, :timestamp, :tx_hash
             )
         """, trade)
+        touch_wallet_activity(conn, trade['wallet_address'], trade['timestamp'])
         return True
     except sqlite3.IntegrityError:
         return False
