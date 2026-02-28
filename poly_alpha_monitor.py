@@ -311,17 +311,13 @@ async def check_resolutions(
             exitp = c.get("exit_price", "?")
             bankroll = c.get("bankroll", 0)
 
-            text = (
-                f"{outcome_tag}  P&L ${pnl:+.2f}
-"
-                f"{market}
-"
-                f"{side} {outcome} | Size ${size:,.0f}
-"
-                f"Entry {entry} -> Exit {exitp}
-"
-                f"Bankroll: ${bankroll:,.2f}"
-            )
+              text = (
+                  f"{outcome_tag}  P&L ${pnl:+.2f}\\n"
+                  f"{market}\\n"
+                  f"{side} {outcome} | Size ${size:,.0f}\\n"
+                  f"Entry {entry} -> Exit {exitp}\\n"
+                  f"Bankroll: ${bankroll:,.2f}"
+              )
 
             try:
                 alerts.send_telegram_sync(text)
