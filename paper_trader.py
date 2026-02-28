@@ -113,64 +113,64 @@ class PaperTrader:
         return pos_id
 
     def close_position(self, pos_id: int, exit_price: float):
-    """Close a paper position and realize P&L. Returns dict summary or None."""
-    row = self.conn.execute(
-        "SELECT * FROM paper_positions WHERE id=?", (pos_id,)
-    ).fetchone()
-    if not row:
-        return None
+        """Close a paper position and realize P&L. Returns dict summary or None."""
+        row = self.conn.execute(
+            "SELECT * FROM paper_positions WHERE id=?", (pos_id,)
+        ).fetchone()
+        if not row:
+            return None
 
-    pos = dict(row)
-    entry = pos["entry_price"]
-    size = pos["size_usd"]
+        pos = dict(row)
+        entry = float(pos["entry_price"])
+        size = float(pos["size_usd"])
+        exit_price = float(exit_price)
 
-    if pos["side"].upper() in ("BUY", "YES", "LONG"):
-        if exit_price > entry:
-            pnl = size * (exit_price - entry) / entry
+        if str(pos.get("side", "")).upper() in ("BUY", "YES", "LONG"):
+            if exit_price > entry:
+                pnl = size * (exit_price - entry) / entry if entry else 0
+            else:
+                pnl = -size * (entry - exit_price) / entry if entry else -size
         else:
-            pnl = -size * (entry - exit_price) / entry
-    else:
-        if exit_price < entry:
-            pnl = size * (entry - exit_price) / (1 - entry) if entry < 1 else 0
-        else:
-            pnl = -size * (exit_price - entry) / (1 - entry) if entry < 1 else -size
+            if exit_price < entry:
+                pnl = size * (entry - exit_price) / (1 - entry) if entry < 1 else 0
+            else:
+                pnl = -size * (exit_price - entry) / (1 - entry) if entry < 1 else -size
 
-    pnl = round(pnl, 2)
+        pnl = round(float(pnl), 2)
 
-    with db.transaction(self.conn):
-        db.close_paper_position(self.conn, pos_id, exit_price, pnl)
-        self.bankroll += size + pnl
-        db.snapshot_ledger(self.conn, self.bankroll)
+        with db.transaction(self.conn):
+            db.close_paper_position(self.conn, pos_id, exit_price, pnl)
+            self.bankroll += size + pnl
+            db.snapshot_ledger(self.conn, self.bankroll)
 
-    # Return info for notifications
-    return {
-        "pos_id": pos_id,
-        "market_slug": pos.get("market_slug", ""),
-        "market_question": pos.get("market_question", ""),
-        "outcome": pos.get("outcome", ""),
-        "side": pos.get("side", ""),
-        "entry_price": entry,
-        "exit_price": float(exit_price),
-        "size_usd": float(size),
-        "pnl": float(pnl),
-        "bankroll": float(self.bankroll),
-        "wallet_address": pos.get("wallet_address", ""),
-    }
+        return {
+            "pos_id": pos_id,
+            "market_slug": pos.get("market_slug", ""),
+            "market_question": pos.get("market_question", ""),
+            "outcome": pos.get("outcome", ""),
+            "side": pos.get("side", ""),
+            "entry_price": entry,
+            "exit_price": exit_price,
+            "size_usd": size,
+            "pnl": pnl,
+            "bankroll": float(self.bankroll),
+            "wallet_address": pos.get("wallet_address", ""),
+        }
 
     def check_resolutions(self, resolved_markets: dict[str, float]):
-    """
-    Check open positions against resolved markets.
-    Returns list of closed position summaries.
-    """
-    closed = []
-    open_pos = db.get_open_positions(self.conn)
-    for pos in open_pos:
-        slug = pos["market_slug"]
-        if slug in resolved_markets:
-            info = self.close_position(pos["id"], resolved_markets[slug])
-            if info:
-                closed.append(info)
-    return closed
+        """
+        Check open positions against resolved markets.
+        Returns list of closed position summaries.
+        """
+        closed = []
+        open_pos = db.get_open_positions(self.conn)
+        for pos in open_pos:
+            slug = pos["market_slug"]
+            if slug in resolved_markets:
+                info = self.close_position(pos["id"], resolved_markets[slug])
+                if info:
+                    closed.append(info)
+        return closed
 
     def get_summary(self) -> dict:
         """Get current paper trading summary."""
