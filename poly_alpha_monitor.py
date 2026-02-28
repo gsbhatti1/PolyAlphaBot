@@ -379,7 +379,9 @@ async def run_monitor(
 
             while RUNNING:
                 poll_count += 1
-                last_poll = time.time()
+                            if poll_count % 5 == 0:
+                logger.info(f"[heartbeat] polls={poll_count} wallets={len(wallets)}")
+		last_poll = time.time()
 
                 for wallet in wallets:
                     if not RUNNING:
