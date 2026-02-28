@@ -380,7 +380,7 @@ async def run_monitor(
             while RUNNING:
                 poll_count += 1
                 if poll_count % 5 == 0:
-                    logger.info(f"[heartbeat] polls={poll_count} wallets={len(wallets)}")
+                    print(f"[heartbeat] polls={poll_count} wallets={len(wallets)}", file=sys.stderr)
 
                 last_poll = time.time()
 
