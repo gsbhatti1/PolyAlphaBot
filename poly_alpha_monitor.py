@@ -218,8 +218,8 @@ async def poll_wallet(
         paper_size = 0
         if paper:
             alpha = wallet.get("alpha", wallet.get("score", wallet.get("alpha_score")))
-	    wallet_metrics = {"alpha": alpha}
-	    sizing = paper.size_trade(wallet_metrics, trade)
+        wallet_metrics = {"alpha": alpha}
+        sizing = paper.size_trade(wallet_metrics, trade)
             logger.info("[PAPER_DEBUG] sizing=%s wallet_keys=%s", sizing, list(wallet.keys()))
             if sizing:
                 paper.open_position(wallet, trade_record, sizing)
