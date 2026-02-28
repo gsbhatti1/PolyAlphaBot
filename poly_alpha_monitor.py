@@ -429,9 +429,9 @@ async def run_monitor(
                           wallets = db.get_active_wallets(conn, limit=max_wallets)
                           if pruned or added:
                                 text = (
-                                    f"🧹 Wallet maintenance\\n"
-                                    f"Pruned: {len(pruned)} (>{DEAD_WALLET_DAYS}d inactive)\\n"
-                                    f"Added: {len(added)}\\n"
+                                    f"🧹 Wallet maintenance\n"
+                                    f"Pruned: {len(pruned)} (>{DEAD_WALLET_DAYS}d inactive)\n"
+                                    f"Added: {len(added)}\n"
                                     f"Active watching: {len(wallets)}/{max_wallets}"
                                 )
                               try:
