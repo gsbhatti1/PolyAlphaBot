@@ -112,7 +112,7 @@ class PaperTrader:
 
         return pos_id
 
-	def close_position(self, pos_id: int, exit_price: float):
+    def close_position(self, pos_id: int, exit_price: float):
     """Close a paper position and realize P&L. Returns dict summary or None."""
     row = self.conn.execute(
         "SELECT * FROM paper_positions WHERE id=?", (pos_id,)
@@ -157,7 +157,7 @@ class PaperTrader:
         "wallet_address": pos.get("wallet_address", ""),
     }
 
-	def check_resolutions(self, resolved_markets: dict[str, float]):
+    def check_resolutions(self, resolved_markets: dict[str, float]):
     """
     Check open positions against resolved markets.
     Returns list of closed position summaries.
