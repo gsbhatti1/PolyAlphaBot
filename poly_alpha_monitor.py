@@ -385,7 +385,7 @@ async def run_monitor(
     last_poll = 0.0
 
 
-      next_maintenance_ts = time.time() + MAINTENANCE_EVERY_SEC
+    next_maintenance_ts = time.time() + MAINTENANCE_EVERY_SEC
     async with httpx.AsyncClient(
         headers={"User-Agent": "PolyAlphaMonitor/1.0"},
         follow_redirects=True,
