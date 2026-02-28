@@ -377,7 +377,7 @@ async def run_monitor(
             refresh_per_second=1,
         ) as live:
 
-	 while RUNNING:
+     while RUNNING:
                 poll_count += 1
                 if poll_count % 5 == 0:
                     logger.info(f"[heartbeat] polls={poll_count} wallets={len(wallets)}")
