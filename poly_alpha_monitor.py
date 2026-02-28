@@ -377,19 +377,18 @@ async def run_monitor(
             refresh_per_second=1,
         ) as live:
 
-     while RUNNING:
+            while RUNNING:
                 poll_count += 1
                 if poll_count % 5 == 0:
                     logger.info(f"[heartbeat] polls={poll_count} wallets={len(wallets)}")
+
                 last_poll = time.time()
 
                 for wallet in wallets:
                     if not RUNNING:
                         break
                     try:
-                        new = await poll_wallet(
-                            client, conn, wallet, paper, min_size
-                        )
+                        new = await poll_wallet(client, conn, wallet, paper, min_size)
                         recent_trades.extend(new)
                     except Exception:
                         pass
@@ -405,9 +404,7 @@ async def run_monitor(
                 conn.commit()
 
                 live.update(
-                    build_dashboard(
-                        wallets, recent_trades, paper, poll_count, last_poll
-                    )
+                    build_dashboard(wallets, recent_trades, paper, poll_count, last_poll)
                 )
 
                 if poll_count % 20 == 0:
@@ -421,6 +418,8 @@ async def run_monitor(
                     if not RUNNING:
                         break
                     await asyncio.sleep(0.5)
+
+
     # Final summary
     if paper:
         s = paper.get_summary()
