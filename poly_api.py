@@ -265,3 +265,19 @@ async def fetch_active_markets(client: httpx.AsyncClient,
         return data.get("markets", data.get("results", []))
     except Exception:
         return []
+
+
+def get_quote(http, market_slug):
+    # best-effort quote from CLOB; fallback to mid if only last/price exists
+    try:
+        r = http.get(f"{CLOB_API}/markets/{market_slug}/book", timeout=10)
+        r.raise_for_status()
+        data = r.json()
+        bid = float(data.get("bid") or data.get("bestBid") or 0.0)
+        ask = float(data.get("ask") or data.get("bestAsk") or 0.0)
+        mid = (bid + ask)/2.0 if bid and ask else float(data.get("mid") or 0.0)
+        spread = (ask - bid) if (bid and ask) else 0.0
+        return {"bid": bid, "ask": ask, "mid": mid, "spread": spread}
+    except Exception:
+        return {"bid": 0.0, "ask": 0.0, "mid": 0.0, "spread": 0.0}
+

@@ -5,11 +5,30 @@ Mirrors detected trades with Kelly-criterion position sizing.
 Tracks a virtual bankroll and P&L.
 """
 import time
+import random
+
 
 import db
 import config
 
 
+
+def _sim_fill_price(side, bid, ask, size_usd, config):
+    slip_bps = float(getattr(config, "SIM_SLIP_BPS_BASE", 8)) + float(getattr(config, "SIM_SLIP_BPS_PER_100USD", 4)) * (float(size_usd)/100.0)
+    fee_usd = float(size_usd) * (float(getattr(config, "SIM_FEE_BPS", 10))/10000.0)
+    if side.upper() == "BUY":
+        base = float(ask)
+        fill = base * (1.0 + slip_bps/10000.0)
+    else:
+        base = float(bid)
+        fill = base * (1.0 - slip_bps/10000.0)
+    return fill, slip_bps, fee_usd
+
+def _sim_latency_sleep(config):
+    lo = int(getattr(config, "SIM_LATENCY_MS_MIN", 250))
+    hi = int(getattr(config, "SIM_LATENCY_MS_MAX", 1200))
+    ms = random.randint(min(lo,hi), max(lo,hi))
+    time.sleep(ms/1000.0)
 class PaperTrader:
     def __init__(self, conn, bankroll: float | None = None):
         self.conn = conn
@@ -75,13 +94,33 @@ class PaperTrader:
         avg_win = pf
         avg_loss = 1.0
 
+        
         fraction = self.kelly_fraction(win_rate, avg_win, avg_loss)
         if fraction <= 0:
+            if getattr(config, 'MIRROR_ALWAYS', False) and self.bankroll >= float(getattr(config,'MIN_TRADE_SIZE',5)):
+                return {
+                    'kelly_fraction': 0,
+                    'size_usd': float(getattr(config,'MIN_TRADE_SIZE',5)),
+                    'bankroll': self.bankroll,
+                }
             return None
 
         size_usd = round(self.bankroll * fraction, 2)
 
-        if size_usd < 5:
+        min_trade = float(getattr(config, "MIN_TRADE_SIZE", 5))
+        max_trade = float(getattr(config, "MAX_PAPER_TRADE_USD", 50))
+
+        # If Kelly suggests too small but bankroll can support minimum, use minimum
+        if size_usd < min_trade:
+            if self.bankroll >= min_trade:
+                size_usd = min_trade
+            else:
+                return None
+
+        size_usd = min(size_usd, self.bankroll, max_trade)
+        size_usd = round(size_usd, 2)
+
+        if size_usd < min_trade:
             return None
 
         return {
@@ -89,6 +128,7 @@ class PaperTrader:
             "size_usd": size_usd,
             "bankroll": self.bankroll,
         }
+
 
 
     def open_position(self, wallet: dict, trade: dict, sizing: dict) -> int:
@@ -105,10 +145,40 @@ class PaperTrader:
             "opened_at": time.time(),
         }
 
-        with db.transaction(self.conn):
-            pos_id = db.open_paper_position(self.conn, pos)
-            self.bankroll -= sizing["size_usd"]
-            db.snapshot_ledger(self.conn, self.bankroll)
+        # Duplicate guard: skip if already open for same market/outcome/side
+        row_dup = self.conn.execute(
+            "SELECT id FROM paper_positions WHERE (closed_at IS NULL OR closed_at=0) AND market_slug=? AND outcome=? AND side=? LIMIT 1",
+            (pos["market_slug"], pos.get("outcome",""), pos.get("side","")),
+        ).fetchone()
+        if row_dup:
+            return -1
+
+        # ── Institutional risk caps ─────────────────────────────
+        max_open_pos = int(getattr(config, "MAX_OPEN_POSITIONS", 10))
+        max_open_exp = float(getattr(config, "MAX_OPEN_EXPOSURE_USD", 300))
+
+        # open_positions / exposure from DB
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(size_usd),0) AS exp FROM paper_positions WHERE closed_at IS NULL OR closed_at=0"
+        ).fetchone()
+        n_open = int(row["n"]) if row and row["n"] is not None else 0
+        exp_open = float(row["exp"]) if row and row["exp"] is not None else 0.0
+
+        if n_open >= max_open_pos:
+            return -1
+        if (exp_open + float(sizing["size_usd"])) > max_open_exp:
+            return -1
+
+        try:
+            with db.transaction(self.conn):
+                pos_id = db.open_paper_position(self.conn, pos)
+                self.bankroll -= sizing["size_usd"]
+                db.snapshot_ledger(self.conn, self.bankroll)
+        except Exception as e:
+            # If unique index blocks duplicates, just skip silently
+            if 'uq_open_pos_market_outcome_side' in str(e) or 'UNIQUE constraint failed' in str(e):
+                return -1
+            raise
 
         return pos_id
 

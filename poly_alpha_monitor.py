@@ -52,6 +52,66 @@ SCANNER_SCRIPT = getattr(config, 'SCANNER_SCRIPT', 'poly_alpha_scanner.py')
 
 REFILL_FROM_INACTIVE = getattr(config, 'REFILL_FROM_INACTIVE', True)
 
+
+def telegram_portfolio_snapshot(conn, paper):
+    """Send a visual portfolio snapshot to Telegram."""
+    try:
+        s = paper.get_summary()
+        last_n = int(getattr(config, "TELEGRAM_PORTFOLIO_LAST_N", 5))
+
+        # open exposure + open positions (already in summary)
+        open_positions = s.get("open_positions", 0)
+        open_exposure = s.get("open_exposure", 0)
+
+        # last opens
+        last_open = conn.execute(
+            """
+            SELECT id, market_slug, outcome, side, entry_price, size_usd, opened_at
+            FROM paper_positions
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (last_n,),
+        ).fetchall()
+
+        # last closes (if you have closed_at column populated)
+        last_close = conn.execute(
+            """
+            SELECT id, market_slug, outcome, side, entry_price, exit_price, size_usd, pnl, closed_at
+            FROM paper_positions
+            WHERE closed_at IS NOT NULL AND closed_at != 0
+            ORDER BY closed_at DESC
+            LIMIT ?
+            """,
+            (last_n,),
+        ).fetchall()
+
+        def fmt_row(r):
+            slug = (r["market_slug"] or "")[:28]
+            return f"- {slug} | {r.get('outcome','')}/{r.get('side','')} | ${float(r.get('size_usd',0)):,.0f}"
+
+        lines = []
+        lines.append("📊 *Paper Portfolio Snapshot*")
+        lines.append(f"Bankroll: *${s['bankroll']:,.2f}*")
+        lines.append(f"P&L: *${s['total_pnl']:+,.2f}*   Return: *{s['total_return_pct']:+.2f}%*")
+        lines.append(f"Trades: {s['total_trades']} (W:{s['wins']} / L:{s['losses']})   Win%: {s['win_rate']:.1%}")
+        lines.append(f"Open: {open_positions}   Exposure: *${float(open_exposure):,.0f}*")
+        if last_open:
+            lines.append("")
+            lines.append("🟦 *Last Opens*")
+            for r in last_open:
+                lines.append(fmt_row(r))
+        if last_close:
+            lines.append("")
+            lines.append("🟥 *Last Closes*")
+            for r in last_close:
+                slug = (r["market_slug"] or "")[:28]
+                lines.append(f"- {slug} | {r.get('outcome','')}/{r.get('side','')} | ${float(r.get('size_usd',0)):,.0f} | PnL ${float(r.get('pnl',0)):+,.2f}")
+
+        alerts.send_telegram_sync("\n".join(lines))
+    except Exception as e:
+        logger.warning("[telegram] portfolio snapshot failed: %r", e)
+
 def telegram_heartbeat(text: str) -> None:
     try:
         print("[telegram] heartbeat: sync", file=sys.stderr)
@@ -67,6 +127,21 @@ logging.basicConfig(level=logging.INFO)
 logging.getLogger('httpx').setLevel(logging.WARNING)
 logging.getLogger('httpcore').setLevel(logging.WARNING)
 RUNNING = True
+TELEGRAM_UPDATE_OFFSET = None
+LAST_REPORT_STATE = None
+LAST_REPORT_SENT_TS = 0
+LAST_PAPER_TS = {}
+LAST_PORTFOLIO_TG_TS = 0
+LAST_DECISION_LOG_TS = 0
+DECISION_COUNTS = {
+  'detected': 0,
+  'min_size_skip': 0,
+  'db_dup_trade': 0,
+  'kelly_skip': 0,
+  'cooldown_skip': 0,
+  'cap_or_dup_skip': 0,
+  'opened': 0,
+}
 
 
 def handle_signal(sig, frame):
@@ -78,6 +153,130 @@ def handle_signal(sig, frame):
 signal.signal(signal.SIGINT, handle_signal)
 signal.signal(signal.SIGTERM, handle_signal)
 
+
+def log_decisions_summary():
+    try:
+        logger.info(
+            "[DECISIONS] detected=%d opened=%d kelly_skip=%d cap/dup=%d cooldown=%d min_size=%d db_dup=%d",
+            DECISION_COUNTS.get('detected',0),
+            DECISION_COUNTS.get('opened',0),
+            DECISION_COUNTS.get('kelly_skip',0),
+            DECISION_COUNTS.get('cap_or_dup_skip',0),
+            DECISION_COUNTS.get('cooldown_skip',0),
+            DECISION_COUNTS.get('min_size_skip',0),
+            DECISION_COUNTS.get('db_dup_trade',0),
+        )
+    except Exception:
+        pass
+
+
+
+def build_portfolio_report(conn, paper) -> str:
+    """Visual Telegram portfolio snapshot (Markdown)."""
+    s = paper.get_summary()
+
+    bankroll = float(s.get("bankroll", 0))
+    pnl = float(s.get("total_pnl", 0))
+    exposure = float(s.get("total_exposure", 0))
+    open_positions = int(s.get("open_positions", 0))
+
+    emoji = "🟢" if pnl >= 0 else "🔴"
+
+    lines = []
+    lines.append("📊 *Poly Alpha Portfolio Snapshot*")
+    lines.append("")
+    lines.append(f"💰 Bankroll: *${bankroll:,.2f}*")
+    lines.append(f"{emoji} PnL: *${pnl:,.2f}*")
+    lines.append(f"📦 Open Positions: *{open_positions}*")
+    lines.append(f"⚖️ Exposure: *${exposure:,.2f}*")
+    lines.append("")
+    lines.append("_Controlled. Adaptive. Institutional._")
+
+    return "\n".join(lines)
+
+def should_send_report(prev: dict | None, cur: dict) -> bool:
+    if prev is None:
+        return True
+    if abs(cur["bankroll"] - prev["bankroll"]) >= float(getattr(config, "REPORT_DELTA_BANKROLL", 25)):
+        return True
+    if abs(cur["pnl"] - prev["pnl"]) >= float(getattr(config, "REPORT_DELTA_PNL", 10)):
+        return True
+    if abs(cur["open_exposure"] - prev["open_exposure"]) >= float(getattr(config, "REPORT_DELTA_EXPOSURE", 50)):
+        return True
+    if cur["open_positions"] != prev["open_positions"] and abs(cur["open_positions"] - prev["open_positions"]) >= int(getattr(config, "REPORT_DELTA_OPEN_POS", 1)):
+        return True
+    if cur["total_trades"] != prev["total_trades"] or cur["wins"] != prev["wins"] or cur["losses"] != prev["losses"]:
+        return True
+    return False
+
+
+async def telegram_command_loop(conn, paper):
+    """Poll Telegram for /status and /report and reply."""
+    global TELEGRAM_UPDATE_OFFSET
+    poll_sec = int(getattr(config, "TELEGRAM_CMD_POLL_SEC", 5))
+
+    while RUNNING:
+        try:
+            data = alerts.get_telegram_updates_sync(offset=TELEGRAM_UPDATE_OFFSET, timeout_sec=15) or {}
+            if data.get("ok"):
+                for u in (data.get("result") or []):
+                    TELEGRAM_UPDATE_OFFSET = int(u.get("update_id", 0)) + 1
+                    msg = u.get("message") or {}
+                    chat = msg.get("chat") or {}
+                    chat_id = str(chat.get("id", ""))
+
+                    # Only answer your configured chat
+                    if str(getattr(config, "TELEGRAM_CHAT_ID", "")) and str(getattr(config, "TELEGRAM_CHAT_ID")) != chat_id:
+                        continue
+
+                    text = (msg.get("text") or "").strip().lower()
+                    if text in ("/status", "/report"):
+                        alerts.send_telegram_sync(build_portfolio_report(conn, paper))
+                    elif text == "/positions":
+                        rows = conn.execute(
+                            """
+                            SELECT market_slug, outcome, side, size_usd
+                            FROM paper_positions
+                            WHERE closed_at IS NULL OR closed_at=0
+                            ORDER BY id DESC
+                            LIMIT 15
+                            """
+                        ).fetchall()
+                        out = ["📦 *Open Positions*"]
+                        if not rows:
+                            out.append("— none —")
+                        else:
+                            for r in rows:
+                                slug = (r["market_slug"] or "")[:28]
+                                out.append(f"- `{slug}` | {r.get('side','?')} {r.get('outcome','?')} | ${float(r.get('size_usd',0)):,.0f}")
+                        alerts.send_telegram_sync("\n".join(out))
+        except Exception as e:
+            logger.warning("[telegram] command loop error: %r", e)
+
+        await asyncio.sleep(poll_sec)
+
+
+
+
+# ── Telegram Alert Rate Limiter ─────────────────────────────
+ALERT_WINDOW_START = 0
+ALERT_COUNT = 0
+
+def can_send_alert():
+    global ALERT_WINDOW_START, ALERT_COUNT
+
+    max_per_min = int(getattr(config, "MAX_TELEGRAM_ALERTS_PER_MIN", 12))
+    now = time.time()
+
+    if ALERT_WINDOW_START == 0 or (now - ALERT_WINDOW_START) >= 60:
+        ALERT_WINDOW_START = now
+        ALERT_COUNT = 0
+
+    if ALERT_COUNT < max_per_min:
+        ALERT_COUNT += 1
+        return True
+
+    return False
 
 def build_dashboard(
     wallets: list[dict],
@@ -212,6 +411,7 @@ async def poll_wallet(
         # Activity fields: usdcSize (USD), size (tokens), price, side, etc.
         size = float(trade.get("usdcSize", trade.get("size", 0)) or 0)
         if size < min_size:
+            DECISION_COUNTS['min_size_skip'] += 1
             continue
 
         tx_hash = trade.get("transactionHash", f"{addr}_{ts}")
@@ -233,7 +433,46 @@ async def poll_wallet(
         # Insert into DB (dedup by tx_hash)
         is_new = db.insert_trade(conn, trade_record)
         if not is_new:
+            DECISION_COUNTS['db_dup_trade'] += 1
             continue
+
+        DECISION_COUNTS['detected'] += 1
+
+
+        # Save features snapshot for learning (dedup by tx_hash)
+        try:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO trade_features (
+                  tx_hash, detected_at, wallet_address, market_slug, outcome, side, size_usd, price,
+                  alpha_score, win_rate, profit_factor, sharpe_ratio, consistency, recency_score, visibility,
+                  markets_traded, avg_bet_size
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                """,
+                (
+                  trade_record.get("tx_hash"),
+                  trade_record.get("detected_at"),
+                  addr,
+                  trade_record.get("market_slug"),
+                  trade_record.get("outcome"),
+                  trade_record.get("side"),
+                  float(trade_record.get("size_usd") or 0),
+                  float(trade_record.get("price") or 0),
+
+                  float(wallet.get("alpha_score") or 0),
+                  float(wallet.get("win_rate") or 0),
+                  float(wallet.get("profit_factor") or 0),
+                  float(wallet.get("sharpe_ratio") or 0),
+                  float(wallet.get("consistency") or 0),
+                  float(wallet.get("recency_score") or 0),
+                  float(wallet.get("visibility") or 0),
+                  float(wallet.get("markets_traded") or 0),
+                  float(wallet.get("avg_bet_size") or 0),
+                ),
+            )
+            conn.commit()
+        except Exception as e:
+            logger.warning("[learn] trade_features insert failed: %r", e)
 
         # Paper trade
         paper_size = 0
@@ -243,31 +482,59 @@ async def poll_wallet(
             sizing = paper.size_trade(wallet_metrics, trade)
             logger.info("[PAPER_DEBUG] sizing=%s wallet_keys=%s", sizing, list(wallet.keys()))
             if sizing:
-                paper.open_position(wallet, trade_record, sizing)
+                cd = int(getattr(config, 'WALLET_COOLDOWN_SEC', 900))
+                now = time.time()
+                last = LAST_PAPER_TS.get(addr, 0)
+                if (now - last) < cd:
+                    DECISION_COUNTS['cooldown_skip'] += 1
+                    logger.info('[PAPER_DEBUG] cooldown active for %s (%.0fs left) -> skip', addr, cd-(now-last))
+                else:
+                    pos_id = paper.open_position(wallet, trade_record, sizing)
+                    if pos_id and int(pos_id) > 0:
+                        LAST_PAPER_TS[addr] = now
+                    else:
+                        logger.info('[PAPER_DEBUG] open_position skipped (caps/duplicate)')
                 paper_size = sizing["size_usd"]
                 trade_record["paper_size"] = paper_size
             else:
-                logger.info("[PAPER_DEBUG] sizing is None/false -> skipped paper trade")
+                DECISION_COUNTS['kelly_skip'] += 1
+                logger.info("[PAPER_DEBUG] sizing None -> skip (kelly/floor)")
         else:
             logger.info("[PAPER_DEBUG] paper trader is OFF (paper=None)")
         # Send alerts
         # Send alerts
-        paper_action = {
-            "size_usd": paper_size,
-            "kelly_fraction": 0,
-            "bankroll": paper.bankroll,
-        } if paper and paper_size else None
+        # Rich paper action object for Telegram (opened vs skipped)
+        paper_action = None
+        if paper:
+            paper_action = {
+                "status": "OPENED" if paper_size else "SKIPPED",
+                "size_usd": float(paper_size or 0),
+                "bankroll": float(getattr(paper, "bankroll", 0.0)),
+            }
 
         msg = alerts.format_new_trade_alert(wallet, trade_record, paper_action)
 
         # Send Telegram alert for the new trade
         try:
-            alerts.send_telegram_sync(msg)
+            alerts.send_telegram_sync(msg) if can_send_alert() else logger.info('telegram alert suppressed')
         except Exception as e:
             logger.warning(f"[telegram] send trade alert failed: {e!r}")
 
 
 
+    global LAST_DECISION_LOG_TS
+    if time.time() - LAST_DECISION_LOG_TS > 60:
+        log_decisions_summary()
+        LAST_DECISION_LOG_TS = time.time()
+    # ── change-driven report (C) ────────────────────────────────
+    global LAST_REPORT_STATE, LAST_REPORT_SENT_TS
+    if paper:
+        cur = report_state(conn, paper)
+        throttle = int(getattr(config, 'REPORT_THROTTLE_SEC', 30))
+        if should_send_report(LAST_REPORT_STATE, cur) and (time.time() - LAST_REPORT_SENT_TS) >= throttle:
+            alerts.send_telegram_sync(build_portfolio_report(conn, paper))
+            LAST_REPORT_STATE = cur
+            LAST_REPORT_SENT_TS = time.time()
     return new_trades
 
 
@@ -312,6 +579,33 @@ async def check_resolutions(
         return
 
     closed = paper.check_resolutions(resolved) or []
+
+    # Label learning rows with realized pnl/result
+    try:
+        for c in closed:
+            slug = c.get("market_slug")
+            pnl = float(c.get("pnl", 0))
+            # result is exit_price (0/1-ish) if available; use None if missing
+            result = None
+            try:
+                result = float(c.get("exit_price"))
+            except Exception:
+                pass
+            conn.execute(
+                """
+                UPDATE trade_features
+                   SET resolved_at=?,
+                       result=?,
+                       pnl=?
+                 WHERE market_slug=?
+                   AND resolved_at IS NULL
+                """,
+                (time.time(), result, pnl, slug),
+            )
+        conn.commit()
+    except Exception as e:
+        logger.warning("[learn] trade_features label update failed: %r", e)
+
     for c in closed:
         pnl = float(c.get("pnl", 0))
         outcome_tag = "✅ WIN" if pnl >= 0 else "❌ LOSS"
@@ -378,6 +672,8 @@ async def run_monitor(
         return
 
     paper = None if no_paper else PaperTrader(conn, bankroll)
+    if paper:
+        asyncio.create_task(telegram_command_loop(conn, paper))  # /status /report
 
     console.print(Panel.fit(
         f"[bold cyan]Polymarket Alpha Monitor[/]\n"
