@@ -32,6 +32,10 @@ from rich.table import Table
 from rich.panel import Panel
 
 import config
+import config
+print(f"[BOOT] config file: {config.__file__}")
+print(f"[BOOT] POLL_INTERVAL={config.POLL_INTERVAL} MAX_WATCH_WALLETS={config.MAX_WATCH_WALLETS} MIN_TRADE_SIZE={config.MIN_TRADE_SIZE}")
+
 import db
 import poly_api
 import alerts
