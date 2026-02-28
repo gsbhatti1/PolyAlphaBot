@@ -53,3 +53,8 @@ DB_PATH = os.getenv("DB_PATH", "/home/polymarket/poly_alpha_bot/poly_alpha.db")
 # ── Rate Limiting ──────────────────────────────────────────────────────────
 REQUEST_DELAY = 0.1               # seconds between API calls
 MAX_RETRIES = 5
+
+# ── Autonomous wallet maintenance ────────────────────────────────────────────
+DEAD_WALLET_DAYS = 5                 # prune wallets if no trades for N days
+MAINTENANCE_EVERY_SEC = 3600         # run maintenance every hour
+REFILL_FROM_INACTIVE = True          # refill from inactive wallets already in DB
