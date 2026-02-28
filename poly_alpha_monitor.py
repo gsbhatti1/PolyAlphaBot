@@ -298,7 +298,6 @@ async def check_resolutions(
 
     if resolved:
         closed = paper.check_resolutions(resolved) or []
-
         for c in closed:
             pnl = float(c.get("pnl", 0))
             outcome_tag = "✅ WIN" if pnl >= 0 else "❌ LOSS"
@@ -311,33 +310,24 @@ async def check_resolutions(
             bankroll = c.get("bankroll", 0)
 
             text = (
-                f"{outcome_tag}  P&L ${pnl:+.2f}\n"
-                f"{market}\n"
-                f"{side} {outcome} | Size ${size:,.0f}\n"
-                f"Entry {entry} → Exit {exitp}\n"
+                f"{outcome_tag}  P&L ${pnl:+.2f}
+"
+                f"{market}
+"
+                f"{side} {outcome} | Size ${size:,.0f}
+"
+                f"Entry {entry} → Exit {exitp}
+"
                 f"Bankroll: ${bankroll:,.2f}"
             )
-
             try:
                 alerts.send_telegram_sync(text)
             except Exception as e:
                 logger.warning(f"[telegram] send win/loss failed: {e!r}")
 
-async def run_maintenance(conn, max_wallets: int):
-    """Prune dead wallets and refill to max_wallets. Returns (pruned, added, active_count)."""
-    pruned = db.prune_dead_wallets(conn, DEAD_WALLET_DAYS)
-    added = []
-    if REFILL_FROM_INACTIVE:
-        row = conn.execute("SELECT COUNT(*) AS n FROM wallets WHERE is_active=1").fetchone()
-        active_count = int(row["n"]) if row else 0
-        need = max(0, int(max_wallets) - int(active_count))
-        if need > 0:
-            added = db.activate_best_inactive(conn, need)
-    row = conn.execute("SELECT COUNT(*) AS n FROM wallets WHERE is_active=1").fetchone()
-    active_count = int(row["n"]) if row else 0
-    return pruned, added, active_count
 
 async def run_monitor(
+
     max_wallets: int,
     interval: int,
     min_size: float,
@@ -399,32 +389,31 @@ async def run_monitor(
             console=console,
             refresh_per_second=1,
         ) as live:
+              while RUNNING:
+                  poll_count += 1
+                  if poll_count % 5 == 0:
+                      print(f"[heartbeat] polls={poll_count} wallets={len(wallets)}", file=sys.stderr)
 
-            while RUNNING:
-                poll_count += 1
-                if poll_count % 5 == 0:
-                    print(f"[heartbeat] polls={poll_count} wallets={len(wallets)}", file=sys.stderr)
+                  last_poll = time.time()
 
-                last_poll = time.time()
+                  for wallet in wallets:
+                      if not RUNNING:
+                          break
+                      try:
+                          new = await poll_wallet(client, conn, wallet, paper, min_size)
+                          recent_trades.extend(new)
+                      except Exception:
+                          pass
 
-                for wallet in wallets:
-                    if not RUNNING:
-                        break
-                    try:
-                        new = await poll_wallet(client, conn, wallet, paper, min_size)
-                        recent_trades.extend(new)
-                    except Exception:
-                        pass
+                  recent_trades = recent_trades[-50:]
 
-                recent_trades = recent_trades[-50:]
+                  if paper and poll_count % 10 == 0:
+                      try:
+                          await check_resolutions(client, conn, paper)
+                      except Exception:
+                          pass
 
-                if paper and poll_count % 10 == 0:
-                    try:
-                        await check_resolutions(client, conn, paper)
-                    except Exception:
-                        pass
-
-                conn.commit()
+                  conn.commit()
 
                   # ── Autonomous maintenance (timestamp-based)
                   now = time.time()
@@ -451,21 +440,21 @@ async def run_monitor(
                           pass
                       next_maintenance_ts = now + MAINTENANCE_EVERY_SEC
 
-                live.update(
-                    build_dashboard(wallets, recent_trades, paper, poll_count, last_poll)
-                )
+                  live.update(
+                      build_dashboard(wallets, recent_trades, paper, poll_count, last_poll)
+                  )
 
-                if poll_count % 20 == 0:
-                    msg = f"🟦 Polymarket bot alive: polls={poll_count}"
-                    try:
-                        telegram_heartbeat(msg)
-                    except Exception as e:
-                        logger.exception("telegram_heartbeat failed: %s", e)
+                  if poll_count % 20 == 0:
+                      msg = f"🟦 Polymarket bot alive: polls={poll_count}"
+                      try:
+                          telegram_heartbeat(msg)
+                      except Exception as e:
+                          logger.exception("telegram_heartbeat failed: %s", e)
 
-                for _ in range(interval * 2):
-                    if not RUNNING:
-                        break
-                    await asyncio.sleep(0.5)
+                  for _ in range(interval * 2):
+                      if not RUNNING:
+                          break
+                      await asyncio.sleep(0.5)
 
 
     # Final summary
