@@ -283,24 +283,32 @@ async def check_resolutions(
                     elif result in ("No", "no", False, "0"):
                         resolved[slug] = 0.0
 
-    if resolved:
-        	closed = paper.check_resolutions(resolved) or []
-	for c in closed:
-   	# build a clear message
-   	 pnl = c.get("pnl", 0)
-    	outcome = "✅ WIN" if pnl >= 0 else "❌ LOSS"
-    	text = (
-       		f"{outcome} ${pnl:+.2f}\n"
-        	f"{c.get('market_question','')}\n"
-        	f"Outcome: {c.get('outcome','')}  Side: {c.get('side','')}\n"
-       		f"Size: ${c.get('size_usd',0):,.0f} @ {c.get('entry_price','?')} → {c.get('exit_price','?')}\n"
-        	f"Bankroll: ${c.get('bankroll','')}"
-    	)
-   	 try:
-       	 alerts.send_telegram_sync(text)
-    	except Exception as e:
-	        logger.warning(f"[telegram] send result failed: {e!r}")
+if resolved:
+    closed = paper.check_resolutions(resolved) or []
 
+    for c in closed:
+        pnl = float(c.get("pnl", 0))
+        outcome_tag = "✅ WIN" if pnl >= 0 else "❌ LOSS"
+        market = (c.get("market_question") or "")[:160]
+        side = c.get("side", "?")
+        outcome = c.get("outcome", "?")
+        size = float(c.get("size_usd", 0))
+        entry = c.get("entry_price", "?")
+        exitp = c.get("exit_price", "?")
+        bankroll = c.get("bankroll", 0)
+
+        text = (
+            f"{outcome_tag}  P&L ${pnl:+.2f}\n"
+            f"{market}\n"
+            f"{side} {outcome} | Size ${size:,.0f}\n"
+            f"Entry {entry} → Exit {exitp}\n"
+            f"Bankroll: ${bankroll:,.2f}"
+        )
+
+        try:
+            alerts.send_telegram_sync(text)
+        except Exception as e:
+            logger.warning(f"[telegram] send win/loss failed: {e!r}")
 
 async def run_monitor(
     max_wallets: int,
