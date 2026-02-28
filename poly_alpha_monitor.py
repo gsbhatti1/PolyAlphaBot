@@ -20,6 +20,7 @@ import asyncio
 import json
 import signal
 import sys
+import os
 import time
 import logging
 from pathlib import Path
@@ -45,6 +46,10 @@ from paper_trader import PaperTrader
 # ── Autonomous maintenance defaults (override in config.py if you want)
 DEAD_WALLET_DAYS = getattr(config, 'DEAD_WALLET_DAYS', 5)
 MAINTENANCE_EVERY_SEC = getattr(config, 'MAINTENANCE_EVERY_SEC', 3600)
+SCAN_REFRESH_EVERY_SEC = getattr(config, 'SCAN_REFRESH_EVERY_SEC', 21600)
+SCAN_LIMIT = getattr(config, 'SCAN_LIMIT', 1000)
+SCANNER_SCRIPT = getattr(config, 'SCANNER_SCRIPT', 'poly_alpha_scanner.py')
+
 REFILL_FROM_INACTIVE = getattr(config, 'REFILL_FROM_INACTIVE', True)
 
 def telegram_heartbeat(text: str) -> None:
@@ -386,6 +391,7 @@ async def run_monitor(
 
 
     next_maintenance_ts = time.time() + MAINTENANCE_EVERY_SEC
+      next_scan_ts = time.time() + SCAN_REFRESH_EVERY_SEC
     async with httpx.AsyncClient(
         headers={"User-Agent": "PolyAlphaMonitor/1.0"},
         follow_redirects=True,
@@ -443,6 +449,41 @@ async def run_monitor(
                       except Exception:
                           pass
                       next_maintenance_ts = now + MAINTENANCE_EVERY_SEC
+
+                  # ── SCANNER_REFRESH (timestamp-based)
+                  if now >= next_scan_ts:
+                      try:
+                          py = sys.executable
+                          scan_cmd = [py, SCANNER_SCRIPT, '--limit', str(SCAN_LIMIT), '--db', db_path]
+                          logger.info('[scanner] running: %s', ' '.join(scan_cmd))
+                          proc = await asyncio.create_subprocess_exec(
+                              *scan_cmd,
+                              cwd=str(Path(__file__).resolve().parent),
+                              stdout=asyncio.subprocess.PIPE,
+                              stderr=asyncio.subprocess.STDOUT,
+                          )
+                          out, _ = await proc.communicate()
+                          ok = (proc.returncode == 0)
+                          # After scan, refill immediately
+                          pruned2, added2, active_n2 = await run_maintenance(conn, max_wallets)
+                          conn.commit()
+                          wallets = db.get_active_wallets(conn, limit=max_wallets)
+                          summary = (
+                              '🔎 Scanner refresh\n'
+                              f'Exit: {proc.returncode} ({"OK" if ok else "FAIL"})\n'
+                              f'Activated after scan: {len(added2)}\n'
+                              f'Watching: {len(wallets)}/{max_wallets}'
+                          )
+                          try:
+                              alerts.send_telegram_sync(summary)
+                          except Exception:
+                              pass
+                          if out:
+                              logger.info('[scanner] output:\n%s', out.decode('utf-8', errors='ignore')[-4000:])
+                      except Exception as e:
+                          logger.exception('[scanner] refresh failed: %s', e)
+                      next_scan_ts = now + SCAN_REFRESH_EVERY_SEC
+
 
                   live.update(
                       build_dashboard(wallets, recent_trades, paper, poll_count, last_poll)
