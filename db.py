@@ -107,6 +107,85 @@ def init_db(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_positions(status);
     """)
 
+    migrate_wallets(conn)
+
+
+
+def _has_column(conn: sqlite3.Connection, table: str, col: str) -> bool:
+    rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+    return any(r["name"] == col for r in rows)
+
+def migrate_wallets(conn: sqlite3.Connection) -> None:
+    """
+    Lightweight migrations for long-running bots.
+    Adds columns safely if missing.
+    """
+    # Track real activity for dead-wallet pruning
+    if not _has_column(conn, "wallets", "last_trade_ts"):
+        conn.execute("ALTER TABLE wallets ADD COLUMN last_trade_ts REAL")
+
+    # Helpful indexes for pruning/refill at scale
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_wallets_active ON wallets(is_active)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_wallets_last_trade ON wallets(last_trade_ts)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_wallets_first_seen ON wallets(first_seen)")
+
+def touch_wallet_activity(conn: sqlite3.Connection, address: str, trade_ts: float) -> None:
+    """
+    Mark a wallet as active + update last_trade_ts.
+    Ensures wallet row exists.
+    """
+    now = time.time()
+    conn.execute(
+        "INSERT OR IGNORE INTO wallets(address, first_seen, last_updated, is_active, meta) "
+        "VALUES (?, ?, ?, 1, '{}')",
+        (address, now, now),
+    )
+    conn.execute(
+        "UPDATE wallets SET last_trade_ts=?, last_updated=?, is_active=1 WHERE address=?",
+        (float(trade_ts), now, address),
+    )
+
+def get_active_wallets(conn: sqlite3.Connection, limit: int) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM wallets WHERE is_active=1 ORDER BY alpha_score DESC LIMIT ?",
+        (limit,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+def prune_dead_wallets(conn: sqlite3.Connection, dead_days: int) -> list[str]:
+    cutoff = time.time() - float(dead_days) * 86400.0
+    # If last_trade_ts is NULL, fall back to first_seen
+    rows = conn.execute(
+        "SELECT address FROM wallets "
+        "WHERE is_active=1 AND COALESCE(last_trade_ts, first_seen, 0) < ?",
+        (cutoff,),
+    ).fetchall()
+    dead = [r["address"] for r in rows]
+    if dead:
+        conn.executemany(
+            "UPDATE wallets SET is_active=0 WHERE address=?",
+            [(a,) for a in dead],
+        )
+    return dead
+
+def activate_best_inactive(conn: sqlite3.Connection, n: int) -> list[str]:
+    if n <= 0:
+        return []
+    rows = conn.execute(
+        "SELECT address FROM wallets "
+        "WHERE is_active=0 "
+        "ORDER BY alpha_score DESC, last_updated DESC "
+        "LIMIT ?",
+        (n,),
+    ).fetchall()
+    addrs = [r["address"] for r in rows]
+    if addrs:
+        conn.executemany(
+            "UPDATE wallets SET is_active=1 WHERE address=?",
+            [(a,) for a in addrs],
+        )
+    return addrs
+
 
 # ── Wallet Operations ──────────────────────────────────────────────────────
 
