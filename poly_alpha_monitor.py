@@ -311,13 +311,13 @@ async def check_resolutions(
         size = float(c.get("size_usd", 0))
         entry = c.get("entry_price", "?")
         exitp = c.get("exit_price", "?")
-    bankroll = c.get("bankroll", 0)
-
-        text = (
-            f"{outcome_tag}  P&L ${pnl:+.2f}
-"
-            f"{market_q}
-"
+              text = (
+                  f"{outcome_tag}  P&L ${pnl:+.2f}\\n"
+                  f"{market}\\n"
+                  f"{side} {outcome} | Size ${size:,.0f}\\n"
+                  f"Entry {entry} -> Exit {exitp}\\n"
+                  f"Bankroll: ${bankroll:,.2f}"
+              )
             f"{side} {outcome} | Size ${size:,.0f}
 "
             f"Entry {entry} -> Exit {exitp}
