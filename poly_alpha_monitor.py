@@ -328,6 +328,7 @@ async def check_resolutions(
 
 async def run_monitor(
 
+
     max_wallets: int,
     interval: int,
     min_size: float,
