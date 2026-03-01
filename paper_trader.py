@@ -37,6 +37,7 @@ class PaperTrader:
         self.last_skip_reason = None
         self.cap_block_until = 0
         self._last_throttle_log_ts = 0
+        self.pos_block_until = 0
 
     def _load_state(self):
         """Resume from last ledger snapshot if available."""
@@ -45,20 +46,21 @@ class PaperTrader:
         ).fetchone()
         if row:
             self.bankroll = row["bankroll"]
+      def _log_outbox(self, mode, market_slug, side, outcome, order_type, size_usd, status, error=None, payload="{}"):
+          """Best-effort outbox logging; must never break execution."""
+          try:
+              cur = self.conn.execute(
+                  """
+                  INSERT INTO order_outbox (ts, mode, market_slug, side, outcome, order_type, size_usd, payload, status, error)
+                  VALUES (?,?,?,?,?,?,?,?,?,?)
+                  """,
+                  (time.time(), mode, market_slug, side, outcome, order_type, float(size_usd), payload or "{}", status, error),
+              )
+              self.conn.commit()
+              return int(cur.lastrowid) if cur is not None else None
+          except Exception:
+              return None
 
-
-    def _log_outbox(self, mode, market_slug, side, outcome, order_type, size_usd, status, error=None, payload="{}"):
-        """Best-effort outbox logging; must never break execution."""
-        try:
-            self.conn.execute(
-                """
-                INSERT INTO order_outbox (ts, mode, market_slug, side, outcome, order_type, size_usd, payload, status, error)
-                VALUES (?,?,?,?,?,?,?,?,?,?)
-                """,
-                (time.time(), mode, market_slug, side, outcome, order_type, float(size_usd), payload or "{}", status, error),
-            )
-        except Exception:
-            pass
 
     # ── Kelly Criterion ────────────────────────────────────────────────────
 
@@ -170,6 +172,14 @@ class PaperTrader:
                 self._last_throttle_log_ts = now
             return -1
 
+        if now < getattr(self, "pos_block_until", 0):
+            self.last_skip_reason = "pos_throttle_active"
+            log_every = int(getattr(config, "THROTTLE_LOG_EVERY_SEC", 60))
+            if (now - getattr(self, "_last_throttle_log_ts", 0)) >= log_every:
+                self._log_outbox(mode, _slug, _side, _outcome, "MARKET", _size, status="skipped", error=self.last_skip_reason)
+                self._last_throttle_log_ts = now
+            return -1
+
         pos = {
             "wallet_address": wallet["address"],
             "market_slug": trade.get("market_slug", trade.get("slug", trade.get("market", ""))),
@@ -181,6 +191,72 @@ class PaperTrader:
             "kelly_fraction": sizing["kelly_fraction"],
             "opened_at": time.time(),
         }
+
+        # ── FETCH QUOTE + SIM FILL (market-order realism) ─────────────────
+        try:
+            import httpx
+            import poly_api
+
+            with httpx.Client(timeout=10.0) as http:
+                quote = poly_api.get_quote(http, pos["market_slug"], outcome=pos.get("outcome"))
+        except Exception:
+            quote = None
+
+        if not isinstance(quote, dict):
+            self.last_skip_reason = "quote_invalid:not_dict"
+            self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"],
+                             "MARKET", pos["size_usd"], status="skipped",
+                             error=self.last_skip_reason, payload=str(quote))
+            return -1
+
+        raw_bid = quote.get("bid")
+        raw_ask = quote.get("ask")
+
+        try:
+            bid = float(raw_bid)
+            ask = float(raw_ask)
+        except Exception:
+            self.last_skip_reason = "quote_invalid:non_numeric"
+            self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"],
+                             "MARKET", pos["size_usd"], status="skipped",
+                             error=self.last_skip_reason, payload=str(quote))
+            return -1
+
+        # reject zeros/negatives/inverted
+        if bid <= 0 or ask <= 0 or ask < bid:
+            self.last_skip_reason = f"quote_invalid:bid={bid:.6f},ask={ask:.6f}"
+            self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"],
+                             "MARKET", pos["size_usd"], status="skipped",
+                             error=self.last_skip_reason, payload=str(quote))
+            return -1
+
+            self.last_skip_reason = "quote_missing"
+            self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"],
+                             "MARKET", pos["size_usd"], status="skipped",
+                             error=self.last_skip_reason)
+            return -1
+
+        bid = float(quote["bid"])
+        ask = float(quote["ask"])
+        mid = (bid + ask) / 2.0
+        spread = ask - bid
+
+        # store quote snapshot
+        try:
+            self.conn.execute(
+                "INSERT INTO quotes (market_slug, ts, bid, ask, mid, spread, source) VALUES (?,?,?,?,?,?,?)",
+                (pos["market_slug"], time.time(), bid, ask, mid, spread, "clob")
+            )
+        except Exception:
+            pass
+
+        _sim_latency_sleep(config)
+        fill_price, slip_bps, fee_usd = _sim_fill_price(
+            pos["side"], bid, ask, pos["size_usd"], config
+        )
+
+        pos["entry_price"] = float(fill_price)
+
 
         # Log every attempt (even if skipped)
         self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"], "MARKET", pos["size_usd"], status="attempt")
@@ -208,6 +284,8 @@ class PaperTrader:
 
         if n_open >= max_open_pos:
             self.last_skip_reason = "cap_max_open_positions"
+            throttle_sec = int(getattr(config, 'CAP_THROTTLE_SEC', 60))
+            self.pos_block_until = time.time() + throttle_sec
             self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"], "MARKET", pos["size_usd"], status="skipped", error=self.last_skip_reason)
             return -1
         if (exp_open + float(sizing["size_usd"])) > max_open_exp:
@@ -219,6 +297,30 @@ class PaperTrader:
         try:
             with db.transaction(self.conn):
                 pos_id = db.open_paper_position(self.conn, pos)
+
+                # log fill
+                try:
+                    row_o = self.conn.execute(
+                        "SELECT id FROM order_outbox WHERE market_slug=? ORDER BY id DESC LIMIT 1",
+                        (pos["market_slug"],)
+                    ).fetchone()
+                    order_id = int(row_o["id"]) if row_o and row_o["id"] else None
+
+                    self.conn.execute(
+                        "INSERT INTO fills (ts, order_id, market_slug, side, outcome, size_usd, bid, ask, fill_price, slip_bps, fee_usd, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (time.time(), order_id, pos["market_slug"], pos["side"], pos["outcome"],
+                         float(pos["size_usd"]), bid, ask,
+                         float(pos["entry_price"]), float(slip_bps), float(fee_usd), "sim_fill")
+                    )
+
+                    if order_id:
+                        self.conn.execute(
+                            "UPDATE order_outbox SET status='filled' WHERE id=?",
+                            (order_id,)
+                        )
+                except Exception:
+                    pass
+
                 # NOTE: bankroll represents equity; do NOT subtract on open (prevents fake decay)
                 db.snapshot_ledger(self.conn, self.bankroll)
         except Exception as e:

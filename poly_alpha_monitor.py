@@ -441,13 +441,25 @@ async def poll_wallet(
 
         # Save features snapshot for learning (dedup by tx_hash)
         try:
+            wallet_snapshot = {
+                "alpha_score": float(wallet.get("alpha_score") or 0),
+                "win_rate": float(wallet.get("win_rate") or 0),
+                "profit_factor": float(wallet.get("profit_factor") or 0),
+                "sharpe_ratio": float(wallet.get("sharpe_ratio") or 0),
+                "consistency": float(wallet.get("consistency") or 0),
+                "recency_score": float(wallet.get("recency_score") or 0),
+                "visibility": float(wallet.get("visibility") or 0),
+                "markets_traded": float(wallet.get("markets_traded") or 0),
+                "avg_bet_size": float(wallet.get("avg_bet_size") or 0),
+                "wallet_keys": list(wallet.keys()),
+            }
+
             conn.execute(
                 """
                 INSERT OR IGNORE INTO trade_features (
-                  tx_hash, detected_at, wallet_address, market_slug, outcome, side, size_usd, price,
-                  alpha_score, win_rate, profit_factor, sharpe_ratio, consistency, recency_score, visibility,
-                  markets_traded, avg_bet_size
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                  tx_hash, detected_at, wallet_address, market_slug, outcome, side,
+                  size_usd, price, timestamp, features
+                ) VALUES (?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                   trade_record.get("tx_hash"),
@@ -458,21 +470,14 @@ async def poll_wallet(
                   trade_record.get("side"),
                   float(trade_record.get("size_usd") or 0),
                   float(trade_record.get("price") or 0),
-
-                  float(wallet.get("alpha_score") or 0),
-                  float(wallet.get("win_rate") or 0),
-                  float(wallet.get("profit_factor") or 0),
-                  float(wallet.get("sharpe_ratio") or 0),
-                  float(wallet.get("consistency") or 0),
-                  float(wallet.get("recency_score") or 0),
-                  float(wallet.get("visibility") or 0),
-                  float(wallet.get("markets_traded") or 0),
-                  float(wallet.get("avg_bet_size") or 0),
+                  float(trade_record.get("timestamp") or 0),
+                  json.dumps(wallet_snapshot),
                 ),
             )
             conn.commit()
         except Exception as e:
             logger.warning("[learn] trade_features insert failed: %r", e)
+
 
         # Paper trade
         paper_size = 0
@@ -493,7 +498,8 @@ async def poll_wallet(
                     if pos_id and int(pos_id) > 0:
                         LAST_PAPER_TS[addr] = now
                     else:
-                        logger.info('[PAPER_DEBUG] open_position skipped (caps/duplicate)')
+                        reason = getattr(paper, 'last_skip_reason', None) or 'unknown_skip'
+                        logger.info('[PAPER_DEBUG] open_position skipped reason=%s', reason)
                 paper_size = sizing["size_usd"]
                 trade_record["paper_size"] = paper_size
             else:
