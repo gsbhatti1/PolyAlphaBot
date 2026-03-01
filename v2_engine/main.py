@@ -120,5 +120,5 @@ def _db_preflight(conn):
 if __name__ == "__main__":
     main()
 
-print(f"[V2] analytics tick complete
+    print(f"[V2] analytics tick complete")
 [RUN COMPLETE]")
