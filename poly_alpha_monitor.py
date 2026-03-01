@@ -728,7 +728,7 @@ async def run_monitor(
                   # --- Paper auto-close to prevent cap deadlock ---
                   if paper:
                       try:
-                          n_closed = paper.auto_close_by_age()
+                          n_closed = paper.auto_close_positions()
                           if n_closed:
                               logger.info('[PAPER_DEBUG] auto_closed=%d', n_closed)
                       except Exception:

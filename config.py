@@ -119,5 +119,5 @@ MAX_TELEGRAM_ALERTS_PER_MIN = 12
 ALERTS_SUPPRESS_SUMMARY = True
 
 # --- Paper position auto-close (prevents cap deadlock) ---
-AUTO_CLOSE_SEC = 900              # 15 minutes
+AUTO_CLOSE_SEC = 60              # 15 minutes
 AUTO_CLOSE_PRICE_MODE = "entry"   # unblock without PnL distortion

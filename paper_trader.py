@@ -526,6 +526,60 @@ class PaperTrader:
 
         return closed
 
+    def auto_close_positions(self) -> int:
+        """Auto-close stale paper positions to prevent cap deadlock."""
+        auto_sec = int(getattr(config, "AUTO_CLOSE_SEC", 0) or 0)
+        if auto_sec <= 0:
+            return 0
+
+        mode = str(getattr(config, "AUTO_CLOSE_PRICE_MODE", "entry") or "entry").lower().strip()
+        now = time.time()
+        closed = 0
+
+        rows = self.conn.execute(
+            """
+            SELECT id, entry_price, opened_at
+            FROM paper_positions
+            WHERE (closed_at IS NULL OR closed_at=0 OR status='open')
+            """
+        ).fetchall()
+
+        for r in rows:
+            try:
+                pos_id = int(r["id"])
+                opened_at = float(r["opened_at"] or 0.0)
+                if opened_at <= 0:
+                    continue
+                if (now - opened_at) < auto_sec:
+                    continue
+
+                entry = float(r["entry_price"] or 0.0)
+                exit_price = entry
+
+                if mode == "mid":
+                    try:
+                        q = self.conn.execute(
+                            """
+                            SELECT mid FROM quotes
+                            WHERE ts > ?
+                            ORDER BY ts DESC
+                            LIMIT 1
+                            """,
+                            (now - 120.0,),
+                        ).fetchone()
+                        if q and q["mid"] is not None:
+                            exit_price = float(q["mid"])
+                    except Exception:
+                        exit_price = entry
+
+                self.close_position(pos_id, exit_price)
+                closed += 1
+            except Exception:
+                continue
+
+        return closed
+
+
     def get_summary(self) -> dict:
         stats = db.get_paper_stats(self.conn)
         open_positions = db.get_open_positions(self.conn)
