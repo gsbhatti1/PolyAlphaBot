@@ -291,32 +291,33 @@ def get_open_positions(conn: sqlite3.Connection) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-def get_paper_stats(conn: sqlite3.Connection) -> dict:
-    closed = conn.execute(
-        "SELECT * FROM paper_positions WHERE status='closed'"
-    ).fetchall()
-    if not closed:
-        return {"total_trades": 0, "wins": 0, "losses": 0,
-                "total_pnl": 0, "win_rate": 0}
-    closed = [dict(r) for r in closed]
-    wins = [t for t in closed if t["pnl"] > 0]
+def get_paper_stats(conn):
+    row = conn.execute(
+        """
+        SELECT
+          COUNT(*) AS total_trades,
+          SUM(CASE WHEN status='closed' AND pnl > 0 THEN 1 ELSE 0 END) AS wins,
+          SUM(CASE WHEN status='closed' AND pnl < 0 THEN 1 ELSE 0 END) AS losses,
+          SUM(CASE WHEN status='closed' AND pnl = 0 THEN 1 ELSE 0 END) AS flats,
+          COALESCE(SUM(CASE WHEN status='closed' THEN pnl ELSE 0 END),0) AS total_pnl
+        FROM paper_positions
+        """
+    ).fetchone()
+
+    total = int(row["total_trades"] or 0)
+    wins = int(row["wins"] or 0)
+    losses = int(row["losses"] or 0)
+    flats = int(row["flats"] or 0)
+    total_pnl = float(row["total_pnl"] or 0.0)
+
+    closed = wins + losses + flats
+    win_rate = (wins / closed) if closed > 0 else 0.0
+
     return {
-        "total_trades": len(closed),
-        "wins": len(wins),
-        "losses": len(closed) - len(wins),
-        "total_pnl": sum(t["pnl"] for t in closed),
-        "win_rate": len(wins) / len(closed) if closed else 0,
+        "total_trades": total,
+        "wins": wins,
+        "losses": losses,
+        "flats": flats,
+        "total_pnl": total_pnl,
+        "win_rate": win_rate,
     }
-
-
-def snapshot_ledger(conn: sqlite3.Connection, bankroll: float):
-    stats = get_paper_stats(conn)
-    open_ct = conn.execute(
-        "SELECT COUNT(*) as c FROM paper_positions WHERE status='open'"
-    ).fetchone()["c"]
-    conn.execute(
-        "INSERT INTO paper_ledger (timestamp, bankroll, open_positions, total_pnl, num_trades, win_rate) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (time.time(), bankroll, open_ct, stats["total_pnl"],
-         stats["total_trades"], stats["win_rate"]),
-    )
