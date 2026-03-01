@@ -45,3 +45,18 @@ __pycache__/
 autoload_patch.py
 build_v2.py
 upgrade_v2_engine.py
+
+# secrets
+.env
+.env.*
+nano.env
+
+# secrets
+.env
+.env.*
+nano.env
+
+# secrets
+.env
+.env.*
+nano.env
