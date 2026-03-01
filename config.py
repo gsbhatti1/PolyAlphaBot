@@ -67,8 +67,8 @@ COOLDOWN_SECONDS_PER_MARKET = 10   # faster recycle (was 20)
 WALLET_COOLDOWN_SEC = 180         # 2 minutes (was 1800!)
 
 # ── Alerts ─────────────────────────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN","")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID","")
 DISCORD_WEBHOOK_URL = os.getenv("DISCORD_WEBHOOK_URL", "")
 
 # ── Database ───────────────────────────────────────────────────────────────
@@ -121,3 +121,6 @@ ALERTS_SUPPRESS_SUMMARY = True
 # --- Paper position auto-close (prevents cap deadlock) ---
 AUTO_CLOSE_SEC = 60              # 15 minutes
 AUTO_CLOSE_PRICE_MODE = "mid"
+TELEGRAM_NOTIFY_DETECTIONS = False
+TELEGRAM_NOTIFY_EXECUTIONS = True
+TELEGRAM_ENABLED = True

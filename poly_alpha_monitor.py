@@ -115,7 +115,7 @@ def telegram_portfolio_snapshot(conn, paper):
 def telegram_heartbeat(text: str) -> None:
     try:
         print("[telegram] heartbeat: sync", file=sys.stderr)
-        alerts.send_telegram_sync(text)
+        alerts.send_telegram_sync(text) if 'NEW DETECTION' not in str(text) else None
     except Exception as e:
         print(f"[telegram] heartbeat failed: {e!r}", file=sys.stderr)
 
@@ -231,7 +231,7 @@ async def telegram_command_loop(conn, paper):
 
                     text = (msg.get("text") or "").strip().lower()
                     if text in ("/status", "/report"):
-                        alerts.send_telegram_sync(build_portfolio_report(conn, paper))
+                        alerts.send_telegram_sync(build_portfolio_snapshot_dbtruth(conn))
                     elif text == "/positions":
                         rows = conn.execute(
                             """
@@ -522,7 +522,7 @@ async def poll_wallet(
 
         # Send Telegram alert for the new trade
         try:
-            alerts.send_telegram_sync(msg) if can_send_alert() else logger.info('telegram alert suppressed')
+            alerts.send_telegram_sync(msg) if 'NEW DETECTION' not in str(msg) else None if can_send_alert() else logger.info('telegram alert suppressed')
         except Exception as e:
             logger.warning(f"[telegram] send trade alert failed: {e!r}")
 
@@ -538,7 +538,7 @@ async def poll_wallet(
         cur = report_state(conn, paper)
         throttle = int(getattr(config, 'REPORT_THROTTLE_SEC', 30))
         if should_send_report(LAST_REPORT_STATE, cur) and (time.time() - LAST_REPORT_SENT_TS) >= throttle:
-            alerts.send_telegram_sync(build_portfolio_report(conn, paper))
+            alerts.send_telegram_sync(build_portfolio_snapshot_dbtruth(conn))
             LAST_REPORT_STATE = cur
             LAST_REPORT_SENT_TS = time.time()
     return new_trades
@@ -632,7 +632,7 @@ async def check_resolutions(
         )
 
         try:
-            alerts.send_telegram_sync(text)
+            alerts.send_telegram_sync(text) if 'NEW DETECTION' not in str(text) else None
         except Exception as e:
             logger.warning(f"[telegram] send win/loss failed: {e!r}")
 
@@ -758,7 +758,7 @@ async def run_monitor(
                                   f"Active watching: {len(wallets)}/{max_wallets}"
                               )
                               try:
-                                  alerts.send_telegram_sync(text)
+                                  alerts.send_telegram_sync(text) if 'NEW DETECTION' not in str(text) else None
                               except Exception:
                                   pass
                       except Exception:
@@ -837,3 +837,49 @@ def send_start_notice_once_per_hour() -> None:
 if __name__ == "__main__":
     send_start_notice_once_per_hour()
     main()
+
+def build_portfolio_snapshot_dbtruth(conn):
+    # SQLite truth snapshot
+    row = conn.execute("SELECT starting_capital FROM capital_account WHERE id=1").fetchone()
+    start = float(row[0] if row else 0.0)
+
+    row = conn.execute(
+        "SELECT COALESCE(SUM(pnl),0) as realized, "
+        "SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins, "
+        "SUM(CASE WHEN pnl<0 THEN 1 ELSE 0 END) as losses, "
+        "COUNT(*) as closed_cnt "
+        "FROM paper_positions WHERE lower(status)='closed'"
+    ).fetchone()
+    realized = float(row[0] or 0.0)
+    wins = int(row[1] or 0)
+    losses = int(row[2] or 0)
+    closed_cnt = int(row[3] or 0)
+    win_rate = (100.0 * wins / closed_cnt) if closed_cnt else 0.0
+
+    row = conn.execute(
+        "SELECT COUNT(*) as open_cnt, COALESCE(SUM(size_usd),0) as locked "
+        "FROM paper_positions WHERE lower(status)='open'"
+    ).fetchone()
+    open_cnt = int(row[0] or 0)
+    locked = float(row[1] or 0.0)
+
+    row = conn.execute(
+        "SELECT bankroll FROM paper_ledger ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    cash = float(row[0] if row else 0.0)
+
+    equity = cash + locked
+    ret_pct = (100.0 * (equity - start) / start) if start else 0.0
+
+    msg = (
+        "📊 Poly Alpha Portfolio Snapshot\n\n"
+        f"💰 Bankroll (Cash): ${cash:,.2f}\n"
+        f"🟣 Equity (Cash+Locked): ${equity:,.2f}\n"
+        f"🟢 Realized PnL: ${realized:,.2f}  ({ret_pct:+.2f}%)\n"
+        f"📦 Open Positions: {open_cnt}\n"
+        f"⚖️ Exposure (Locked): ${locked:,.2f}\n"
+        f"✅ Wins/Losses: {wins}/{losses}  Win rate: {win_rate:.1f}%\n\n"
+        "Controlled. Adaptive. Institutional."
+    )
+    return msg
+

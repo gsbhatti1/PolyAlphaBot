@@ -321,3 +321,51 @@ def get_paper_stats(conn):
         "total_pnl": total_pnl,
         "win_rate": win_rate,
     }
+
+
+# --- ledger snapshot (required by order_outbox / paper execution pipeline) ---
+def snapshot_ledger(conn, bankroll=None, timestamp=None, **_):
+    """
+    DB-truth ledger snapshot:
+      cash_free (bankroll) comes from caller (paper engine cash)
+      open_positions, realized_pnl, win_rate, closed_trades come from SQLite truth
+      equity = cash_free + locked_usd (reported via total_pnl as realized only unless you add MTM)
+    """
+    import time as _t
+
+    ts = float(timestamp) if timestamp is not None else _t.time()
+    cash_free = float(bankroll) if bankroll is not None else 0.0
+
+    # locked + open count
+    row = conn.execute(
+        "SELECT COUNT(*) as open_cnt, COALESCE(SUM(size_usd),0) as locked "
+        "FROM paper_positions WHERE lower(status)='open'"
+    ).fetchone()
+    open_cnt = int(row[0] if row is not None else 0)
+    locked = float(row[1] if row is not None else 0.0)
+
+    # realized pnl + closed stats
+    row = conn.execute(
+        "SELECT "
+        "SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins, "
+        "SUM(CASE WHEN pnl<0 THEN 1 ELSE 0 END) as losses, "
+        "COUNT(*) as closed_cnt, "
+        "COALESCE(SUM(pnl),0) as realized "
+        "FROM paper_positions WHERE lower(status)='closed'"
+    ).fetchone()
+    wins = int(row[0] or 0)
+    losses = int(row[1] or 0)
+    closed_cnt = int(row[2] or 0)
+    realized = float(row[3] or 0.0)
+    win_rate = (100.0 * wins / closed_cnt) if closed_cnt else 0.0
+
+    # total_pnl here = realized only (unrealized requires mark-to-market)
+    total_pnl = realized
+    num_trades = closed_cnt
+
+    conn.execute(
+        "INSERT INTO paper_ledger (timestamp, bankroll, open_positions, total_pnl, num_trades, win_rate) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (ts, cash_free, open_cnt, total_pnl, num_trades, win_rate),
+    )
+    conn.commit()
