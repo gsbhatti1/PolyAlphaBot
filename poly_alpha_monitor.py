@@ -725,6 +725,16 @@ async def run_monitor(
 
                   recent_trades = recent_trades[-50:]
 
+                  # --- Paper auto-close to prevent cap deadlock ---
+                  if paper:
+                      try:
+                          n_closed = paper.auto_close_by_age()
+                          if n_closed:
+                              logger.info('[PAPER_DEBUG] auto_closed=%d', n_closed)
+                      except Exception:
+                          pass
+
+
                   if paper and poll_count % 10 == 0:
                       try:
                           await check_resolutions(client, conn, paper)

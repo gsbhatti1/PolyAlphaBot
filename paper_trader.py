@@ -388,6 +388,10 @@ class PaperTrader:
             with db.transaction(self.conn):
                 pos_id = db.open_paper_position(self.conn, pos)
 
+                # --- CASH-LOCK bankroll (prevents fake profit) ---
+                # reserve principal at open; released at close
+                self.bankroll -= float(pos['size_usd'])
+                db.snapshot_ledger(self.conn, self.bankroll)
                 # fill MUST be tied to outbox_id
                 self._insert_fill(
                     outbox_id=outbox_id or 0,
@@ -465,14 +469,77 @@ class PaperTrader:
                     closed.append(info)
         return closed
 
+    def auto_close_by_age(self) -> int:
+        """
+        Close paper positions older than AUTO_CLOSE_SEC so the book doesn't hit cap forever.
+        Price mode:
+          - entry: exit_price = entry_price (PnL=0) safest unblock
+          - mid:   exit_price = latest quotes.mid if available
+        """
+        hold_sec = int(getattr(config, "AUTO_CLOSE_SEC", 0) or 0)
+        if hold_sec <= 0:
+            return 0
+
+        now = time.time()
+        cutoff = now - hold_sec
+        mode = str(getattr(config, "AUTO_CLOSE_PRICE_MODE", "entry") or "entry").lower()
+
+        rows = self.conn.execute(
+            """
+            SELECT id, market_slug, entry_price
+            FROM paper_positions
+            WHERE status='open' AND opened_at < ?
+            ORDER BY opened_at ASC
+            LIMIT 200
+            """,
+            (cutoff,),
+        ).fetchall()
+
+        closed = 0
+        for r in rows:
+            try:
+                pos_id = int(r["id"])
+                entry = float(r["entry_price"] or 0.0)
+                exit_price = entry
+
+                if mode == "mid":
+                    q = self.conn.execute(
+                        """
+                        SELECT mid
+                        FROM quotes
+                        WHERE market_slug=?
+                        ORDER BY ts DESC
+                        LIMIT 1
+                        """,
+                        (r["market_slug"],),
+                    ).fetchone()
+                    if q and q["mid"] is not None:
+                        try:
+                            exit_price = float(q["mid"])
+                        except Exception:
+                            exit_price = entry
+
+                self.close_position(pos_id, exit_price)
+                closed += 1
+            except Exception:
+                continue
+
+        return closed
+
     def get_summary(self) -> dict:
         stats = db.get_paper_stats(self.conn)
         open_positions = db.get_open_positions(self.conn)
         open_exposure = sum(float(p.get("size_usd") or 0.0) for p in open_positions)
+
+        # truth-based return: use realized P&L from stats (DB has paper_positions.pnl)
+        total_pnl = float(stats.get("total_pnl", stats.get("pnl", 0.0)) or 0.0)
+        total_return_pct = round((total_pnl / float(config.STARTING_BANKROLL)) * 100, 2)
+
         return {
-            "bankroll": round(self.bankroll, 2),
-            "starting_bankroll": config.STARTING_BANKROLL,
-            "total_return_pct": round((self.bankroll - config.STARTING_BANKROLL) / config.STARTING_BANKROLL * 100, 2),
+            "bankroll": round(float(self.bankroll or 0.0), 2),
+            "starting_bankroll": float(config.STARTING_BANKROLL),
+            "total_pnl": total_pnl,
+            "total_return_pct": total_return_pct,
             "open_positions": len(open_positions),
             "open_exposure": round(open_exposure, 2),
             **stats,
