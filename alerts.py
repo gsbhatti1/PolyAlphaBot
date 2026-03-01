@@ -10,6 +10,24 @@ import config
 logger = logging.getLogger(__name__)
 
 
+def get_telegram_updates_sync(offset: int | None = None, timeout_sec: int = 15) -> dict:
+    """Fetch Telegram updates (sync). Used for /status and /report."""
+    if not getattr(config, "TELEGRAM_BOT_TOKEN", None):
+        return {"ok": False, "result": []}
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/getUpdates"
+    params = {"timeout": timeout_sec}
+    if offset is not None:
+        params["offset"] = offset
+    try:
+        r = httpx.get(url, params=params, timeout=timeout_sec + 10)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        logger.error(f"Telegram getUpdates error: {e!r}")
+        return {"ok": False, "result": []}
+
+
+
 async def send_telegram(message: str, client: httpx.AsyncClient | None = None):
     if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
         logger.debug("Telegram not configured")
@@ -70,49 +88,147 @@ async def send_alert(message: str, client: httpx.AsyncClient | None = None):
 
 
 def format_new_trade_alert(wallet: dict, trade: dict, paper_action: dict | None = None) -> str:
-    """Format a trade detection into an alert message."""
-    addr = wallet.get("address", "?")[:10]
-    name = wallet.get("username", addr)
-    score = wallet.get("alpha_score", 0)
+    """Very visual Telegram alert (Markdown)."""
 
-    market = trade.get("market_question", trade.get("market", "?"))
-    outcome = trade.get("outcome", "?")
-    side = trade.get("side", "?")
+    def safe(s) -> str:
+        return (str(s) if s is not None else "").replace("\n", " ").strip()
+
+    def money(x) -> str:
+        try:
+            return f"${float(x):,.0f}"
+        except Exception:
+            return "$0"
+
+    def num(x, n=3) -> str:
+        try:
+            return f"{float(x):.{n}f}"
+        except Exception:
+            return "0"
+
+    # ── Wallet
+    addr = safe(wallet.get("address", "?"))
+    addr_short = addr[:10] if addr else "?"
+    name = safe(wallet.get("username") or addr_short)
+
+    alpha = wallet.get("alpha_score", wallet.get("alpha", wallet.get("score", 0))) or 0
+    try:
+        alpha_s = f"{float(alpha):.3f}"
+    except Exception:
+        alpha_s = "0.000"
+
+    win_rate = wallet.get("win_rate", None)
+    pnl = wallet.get("pnl", None)
+
+    stats_bits = [f"α {alpha_s}"]
+    if isinstance(win_rate, (int, float)):
+        stats_bits.append(f"Win {float(win_rate)*100:.1f}%")
+    if isinstance(pnl, (int, float)):
+        stats_bits.append(f"PnL {float(pnl):+,.0f}")
+
+    # ── Trade
+    market = safe(trade.get("market_question", trade.get("market", "?")))
+    slug = safe(trade.get("market_slug", trade.get("slug", "")))
+    outcome = safe(trade.get("outcome", "?"))
+    side_raw = safe(trade.get("side", "?"))
     size = trade.get("size_usd", trade.get("size", 0))
     price = trade.get("price", 0)
 
-    lines = [
-        f"🔔 *New Trade Detected*",
-        f"Wallet: `{name}` (α {score:.2f})",
-        f"Market: {market[:80]}",
-        f"Side: {side} {outcome} @ {float(price):.2f}",
-        f"Size: ${float(size):,.0f}",
-    ]
+    side_up = side_raw.upper()
+    if side_up in ("BUY", "YES", "LONG"):
+        header = "🟢 *NEW DETECTION — BUY*"
+        side_tag = "BUY"
+    elif side_up in ("SELL", "NO", "SHORT"):
+        header = "🔴 *NEW DETECTION — SELL*"
+        side_tag = "SELL"
+    else:
+        header = "🟡 *NEW DETECTION — TRADE*"
+        side_tag = side_raw or "TRADE"
 
+    lines = []
+    lines.append(header)
+    lines.append(f"👤 Wallet: `{name}`  ({' · '.join(stats_bits)})")
+    lines.append(f"🎯 Market: {market[:160]}")
+    if slug:
+        lines.append(f"🔗 Slug: `{slug[:60]}`")
+
+    lines.append("")
+    lines.append("📥 *Detected Trade*")
+    lines.append(f"- Side: *{side_tag}*")
+    lines.append(f"- Outcome: *{outcome}*")
+    lines.append(f"- Price: `{num(price, 3)}`")
+    lines.append(f"- Size: *{money(size)}*")
+
+    # ── Paper action (OPENED vs SKIPPED)
     if paper_action:
+        status = safe(paper_action.get("status", "")).upper()
+        psize = paper_action.get("size_usd", 0)
+        bankroll = paper_action.get("bankroll", None)
+        kelly = paper_action.get("kelly_fraction", None)
+        reason = paper_action.get("reason", None)
+
         lines.append("")
-        lines.append(f"📝 *Paper Trade*")
-        lines.append(f"Size: ${paper_action['size_usd']:,.0f} "
-                      f"(Kelly: {paper_action['kelly_fraction']:.1%})")
-        lines.append(f"Bankroll: ${paper_action['bankroll']:,.0f}")
+        lines.append("🧾 *Paper Execution*")
 
+        if status == "OPENED" and float(psize or 0) > 0:
+            lines.append("- Status: ✅ *OPENED*")
+            lines.append(f"- Paper Size: *{money(psize)}*")
+        else:
+            lines.append("- Status: ⛔ *SKIPPED*")
+            if reason:
+                lines.append(f"- Reason: `{safe(reason)[:90]}`")
+
+        if kelly is not None:
+            try:
+                lines.append(f"- Kelly: `{float(kelly):.3f}`")
+            except Exception:
+                pass
+
+        if bankroll is not None:
+            try:
+                lines.append(f"- Bankroll After: *${float(bankroll):,.2f}*")
+            except Exception:
+                pass
+
+    lines.append("")
+    lines.append("—")
+    lines.append(f"`{addr_short}`")
     return "\n".join(lines)
+
+
+
 def send_telegram_sync(message: str) -> None:
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-
-    if not token or not chat_id:
-        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    data = {
-        "chat_id": chat_id,
+    """Synchronous Telegram sender (used by systemd service + command loop)."""
+    if not getattr(config, "TELEGRAM_BOT_TOKEN", None) or not getattr(config, "TELEGRAM_CHAT_ID", None):
+        logger.debug("Telegram not configured")
+        return
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": config.TELEGRAM_CHAT_ID,
         "text": message,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
     }
+    try:
+        r = httpx.post(url, json=payload, timeout=10.0)
+        r.raise_for_status()
+        logger.info("Telegram alert sent successfully (sync)")
+    except Exception as e:
+        logger.error(f"Telegram sync send error: {e!r}")
 
-    with httpx.Client(timeout=15.0) as client:
-        r = client.post(url, data=data)
-        if r.status_code != 200:
-            raise RuntimeError(
-                f"Telegram HTTP {r.status_code}: {r.text[:300]}"
-            )
+def send_discord_sync(message: str) -> None:
+    """Synchronous Discord sender."""
+    if not getattr(config, "DISCORD_WEBHOOK_URL", None):
+        logger.debug("Discord not configured")
+        return
+    try:
+        r = httpx.post(config.DISCORD_WEBHOOK_URL, json={"content": message}, timeout=10.0)
+        r.raise_for_status()
+        logger.info("Discord alert sent successfully (sync)")
+    except Exception as e:
+        logger.error(f"Discord sync send error: {e!r}")
+
+def send_alert_sync(message: str) -> None:
+    """Sync send to all configured channels."""
+    send_telegram_sync(message)
+    send_discord_sync(message)
+

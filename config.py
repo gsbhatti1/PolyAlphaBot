@@ -17,6 +17,17 @@ FORCE_PAPER_EXECUTION = True
 FORCE_MIN_TRADE_USD = 1
 FORCE_MAX_PER_HOUR = 10
 
+# ── Execution Mode (Paper ≈ Live) ──────────────────────────────────────────
+EXECUTION_MODE = "PAPER"          # PAPER / SHADOW / LIVE
+LIVE_CAPITAL_FRACTION = 0.01      # 1% when LIVE
+
+# Market-order realism (paper sim)
+SIM_LATENCY_MS_MIN = 250
+SIM_LATENCY_MS_MAX = 1200
+SIM_SLIP_BPS_BASE = 8
+SIM_SLIP_BPS_PER_100USD = 4
+SIM_FEE_BPS = 10                  # adjust to real later
+
 # ── Scanner Defaults (who to follow) ───────────────────────────────────────
 DEFAULT_SCAN_LIMIT = 1000         # pull more wallets
 MIN_PNL = 0                       # include all
@@ -32,7 +43,7 @@ MAX_WATCH_WALLETS = 150           # monitor more wallets
 MIN_TRADE_SIZE = 5                # minimum detected trade size (USD)
 
 # ── Paper Trader Defaults (sizing) ─────────────────────────────────────────
-STARTING_BANKROLL = 10_000
+STARTING_BANKROLL = 1000
 DEFAULT_KELLY_FRACTION = 1.0      # full Kelly (paper only)
 MAX_POSITION_PCT = 0.35           # up to 35% of bankroll per trade (paper only)
 
@@ -63,3 +74,34 @@ REFILL_FROM_INACTIVE = True          # refill from inactive wallets already in D
 SCAN_REFRESH_EVERY_SEC = 21600   # 6 hours
 SCAN_LIMIT = 1000                # leaderboard entries to scan
 SCANNER_SCRIPT = "poly_alpha_scanner.py"
+
+MAX_PAPER_TRADE_USD = 25
+MIRROR_ALWAYS = True
+MAX_OPEN_POSITIONS = 30
+MAX_OPEN_EXPOSURE_USD = 1000
+
+WALLET_COOLDOWN_SEC = 1800
+
+TELEGRAM_PORTFOLIO_EVERY_SEC = 600
+
+TELEGRAM_PORTFOLIO_LAST_N = 5
+
+TELEGRAM_CMD_POLL_SEC = 5
+
+REPORT_DELTA_BANKROLL = 25
+
+REPORT_DELTA_PNL = 10
+
+REPORT_DELTA_OPEN_POS = 1
+
+REPORT_DELTA_EXPOSURE = 50
+
+REPORT_THROTTLE_SEC = 30
+
+IGNORE_OLD_TRADES_ON_BOOT_SEC = 300
+
+MAX_TELEGRAM_ALERTS_PER_MIN = 12
+
+ALERTS_SUPPRESS_SUMMARY = True
+
+

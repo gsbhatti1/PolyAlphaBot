@@ -5,16 +5,39 @@ Mirrors detected trades with Kelly-criterion position sizing.
 Tracks a virtual bankroll and P&L.
 """
 import time
+import random
+
 
 import db
 import config
 
 
+
+def _sim_fill_price(side, bid, ask, size_usd, config):
+    slip_bps = float(getattr(config, "SIM_SLIP_BPS_BASE", 8)) + float(getattr(config, "SIM_SLIP_BPS_PER_100USD", 4)) * (float(size_usd)/100.0)
+    fee_usd = float(size_usd) * (float(getattr(config, "SIM_FEE_BPS", 10))/10000.0)
+    if side.upper() == "BUY":
+        base = float(ask)
+        fill = base * (1.0 + slip_bps/10000.0)
+    else:
+        base = float(bid)
+        fill = base * (1.0 - slip_bps/10000.0)
+    return fill, slip_bps, fee_usd
+
+def _sim_latency_sleep(config):
+    lo = int(getattr(config, "SIM_LATENCY_MS_MIN", 250))
+    hi = int(getattr(config, "SIM_LATENCY_MS_MAX", 1200))
+    ms = random.randint(min(lo,hi), max(lo,hi))
+    time.sleep(ms/1000.0)
 class PaperTrader:
     def __init__(self, conn, bankroll: float | None = None):
         self.conn = conn
         self.bankroll = bankroll or config.STARTING_BANKROLL
         self._load_state()
+        self.last_skip_reason = None
+        self.cap_block_until = 0
+        self._last_throttle_log_ts = 0
+        self.pos_block_until = 0
 
     def _load_state(self):
         """Resume from last ledger snapshot if available."""
@@ -23,6 +46,21 @@ class PaperTrader:
         ).fetchone()
         if row:
             self.bankroll = row["bankroll"]
+      def _log_outbox(self, mode, market_slug, side, outcome, order_type, size_usd, status, error=None, payload="{}"):
+          """Best-effort outbox logging; must never break execution."""
+          try:
+              cur = self.conn.execute(
+                  """
+                  INSERT INTO order_outbox (ts, mode, market_slug, side, outcome, order_type, size_usd, payload, status, error)
+                  VALUES (?,?,?,?,?,?,?,?,?,?)
+                  """,
+                  (time.time(), mode, market_slug, side, outcome, order_type, float(size_usd), payload or "{}", status, error),
+              )
+              self.conn.commit()
+              return int(cur.lastrowid) if cur is not None else None
+          except Exception:
+              return None
+
 
     # ── Kelly Criterion ────────────────────────────────────────────────────
 
@@ -75,13 +113,33 @@ class PaperTrader:
         avg_win = pf
         avg_loss = 1.0
 
+        
         fraction = self.kelly_fraction(win_rate, avg_win, avg_loss)
         if fraction <= 0:
+            if getattr(config, 'MIRROR_ALWAYS', False) and self.bankroll >= float(getattr(config,'MIN_TRADE_SIZE',5)):
+                return {
+                    'kelly_fraction': 0,
+                    'size_usd': float(getattr(config,'MIN_TRADE_SIZE',5)),
+                    'bankroll': self.bankroll,
+                }
             return None
 
         size_usd = round(self.bankroll * fraction, 2)
 
-        if size_usd < 5:
+        min_trade = float(getattr(config, "MIN_TRADE_SIZE", 5))
+        max_trade = float(getattr(config, "MAX_PAPER_TRADE_USD", 50))
+
+        # If Kelly suggests too small but bankroll can support minimum, use minimum
+        if size_usd < min_trade:
+            if self.bankroll >= min_trade:
+                size_usd = min_trade
+            else:
+                return None
+
+        size_usd = min(size_usd, self.bankroll, max_trade)
+        size_usd = round(size_usd, 2)
+
+        if size_usd < min_trade:
             return None
 
         return {
@@ -91,8 +149,37 @@ class PaperTrader:
         }
 
 
+
     def open_position(self, wallet: dict, trade: dict, sizing: dict) -> int:
         """Open a paper position mirroring a detected trade."""
+        self.last_skip_reason = None
+        mode = getattr(config, 'EXECUTION_MODE', 'PAPER')
+        # cap throttle (prevents outbox spam when exposure cap is hit)
+        throttle_sec = int(getattr(config, "CAP_THROTTLE_SEC", 60))
+        now = time.time()
+
+        # compute key fields early so we can log throttle skips without writing an 'attempt'
+        _slug = trade.get("market_slug", trade.get("slug", trade.get("market", "")))
+        _outcome = trade.get("outcome", "")
+        _side = trade.get("side", "")
+        _size = float(sizing.get("size_usd") or 0)
+
+        if now < getattr(self, "cap_block_until", 0):
+            self.last_skip_reason = "cap_throttle_active"
+            log_every = int(getattr(config, "THROTTLE_LOG_EVERY_SEC", 60))
+            if (now - getattr(self, "_last_throttle_log_ts", 0)) >= log_every:
+                self._log_outbox(mode, _slug, _side, _outcome, "MARKET", _size, status="skipped", error=self.last_skip_reason)
+                self._last_throttle_log_ts = now
+            return -1
+
+        if now < getattr(self, "pos_block_until", 0):
+            self.last_skip_reason = "pos_throttle_active"
+            log_every = int(getattr(config, "THROTTLE_LOG_EVERY_SEC", 60))
+            if (now - getattr(self, "_last_throttle_log_ts", 0)) >= log_every:
+                self._log_outbox(mode, _slug, _side, _outcome, "MARKET", _size, status="skipped", error=self.last_skip_reason)
+                self._last_throttle_log_ts = now
+            return -1
+
         pos = {
             "wallet_address": wallet["address"],
             "market_slug": trade.get("market_slug", trade.get("slug", trade.get("market", ""))),
@@ -105,10 +192,146 @@ class PaperTrader:
             "opened_at": time.time(),
         }
 
-        with db.transaction(self.conn):
-            pos_id = db.open_paper_position(self.conn, pos)
-            self.bankroll -= sizing["size_usd"]
-            db.snapshot_ledger(self.conn, self.bankroll)
+        # ── FETCH QUOTE + SIM FILL (market-order realism) ─────────────────
+        try:
+            import httpx
+            import poly_api
+
+            with httpx.Client(timeout=10.0) as http:
+                quote = poly_api.get_quote(http, pos["market_slug"], outcome=pos.get("outcome"))
+        except Exception:
+            quote = None
+
+        if not isinstance(quote, dict):
+            self.last_skip_reason = "quote_invalid:not_dict"
+            self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"],
+                             "MARKET", pos["size_usd"], status="skipped",
+                             error=self.last_skip_reason, payload=str(quote))
+            return -1
+
+        raw_bid = quote.get("bid")
+        raw_ask = quote.get("ask")
+
+        try:
+            bid = float(raw_bid)
+            ask = float(raw_ask)
+        except Exception:
+            self.last_skip_reason = "quote_invalid:non_numeric"
+            self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"],
+                             "MARKET", pos["size_usd"], status="skipped",
+                             error=self.last_skip_reason, payload=str(quote))
+            return -1
+
+        # reject zeros/negatives/inverted
+        if bid <= 0 or ask <= 0 or ask < bid:
+            self.last_skip_reason = f"quote_invalid:bid={bid:.6f},ask={ask:.6f}"
+            self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"],
+                             "MARKET", pos["size_usd"], status="skipped",
+                             error=self.last_skip_reason, payload=str(quote))
+            return -1
+
+            self.last_skip_reason = "quote_missing"
+            self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"],
+                             "MARKET", pos["size_usd"], status="skipped",
+                             error=self.last_skip_reason)
+            return -1
+
+        bid = float(quote["bid"])
+        ask = float(quote["ask"])
+        mid = (bid + ask) / 2.0
+        spread = ask - bid
+
+        # store quote snapshot
+        try:
+            self.conn.execute(
+                "INSERT INTO quotes (market_slug, ts, bid, ask, mid, spread, source) VALUES (?,?,?,?,?,?,?)",
+                (pos["market_slug"], time.time(), bid, ask, mid, spread, "clob")
+            )
+        except Exception:
+            pass
+
+        _sim_latency_sleep(config)
+        fill_price, slip_bps, fee_usd = _sim_fill_price(
+            pos["side"], bid, ask, pos["size_usd"], config
+        )
+
+        pos["entry_price"] = float(fill_price)
+
+
+        # Log every attempt (even if skipped)
+        self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"], "MARKET", pos["size_usd"], status="attempt")
+
+        # Duplicate guard: skip if already open for same market/outcome/side
+        row_dup = self.conn.execute(
+            "SELECT id FROM paper_positions WHERE (closed_at IS NULL OR closed_at=0) AND market_slug=? AND outcome=? AND side=? LIMIT 1",
+            (pos["market_slug"], pos.get("outcome",""), pos.get("side","")),
+        ).fetchone()
+        if row_dup:
+            self.last_skip_reason = "duplicate_open_position"
+            self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"], "MARKET", pos["size_usd"], status="skipped", error=self.last_skip_reason)
+            return -1
+
+        # ── Institutional risk caps ─────────────────────────────
+        max_open_pos = int(getattr(config, "MAX_OPEN_POSITIONS", 10))
+        max_open_exp = float(getattr(config, "MAX_OPEN_EXPOSURE_USD", 300))
+
+        # open_positions / exposure from DB
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(size_usd),0) AS exp FROM paper_positions WHERE closed_at IS NULL OR closed_at=0"
+        ).fetchone()
+        n_open = int(row["n"]) if row and row["n"] is not None else 0
+        exp_open = float(row["exp"]) if row and row["exp"] is not None else 0.0
+
+        if n_open >= max_open_pos:
+            self.last_skip_reason = "cap_max_open_positions"
+            throttle_sec = int(getattr(config, 'CAP_THROTTLE_SEC', 60))
+            self.pos_block_until = time.time() + throttle_sec
+            self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"], "MARKET", pos["size_usd"], status="skipped", error=self.last_skip_reason)
+            return -1
+        if (exp_open + float(sizing["size_usd"])) > max_open_exp:
+            self.last_skip_reason = f"cap_max_open_exposure exp={exp_open:.2f} add={float(sizing['size_usd']):.2f} max={max_open_exp:.2f}"
+            self.cap_block_until = time.time() + 60
+            self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"], "MARKET", pos["size_usd"], status="skipped", error=self.last_skip_reason)
+            return -1
+
+        try:
+            with db.transaction(self.conn):
+                pos_id = db.open_paper_position(self.conn, pos)
+
+                # log fill
+                try:
+                    row_o = self.conn.execute(
+                        "SELECT id FROM order_outbox WHERE market_slug=? ORDER BY id DESC LIMIT 1",
+                        (pos["market_slug"],)
+                    ).fetchone()
+                    order_id = int(row_o["id"]) if row_o and row_o["id"] else None
+
+                    self.conn.execute(
+                        "INSERT INTO fills (ts, order_id, market_slug, side, outcome, size_usd, bid, ask, fill_price, slip_bps, fee_usd, notes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (time.time(), order_id, pos["market_slug"], pos["side"], pos["outcome"],
+                         float(pos["size_usd"]), bid, ask,
+                         float(pos["entry_price"]), float(slip_bps), float(fee_usd), "sim_fill")
+                    )
+
+                    if order_id:
+                        self.conn.execute(
+                            "UPDATE order_outbox SET status='filled' WHERE id=?",
+                            (order_id,)
+                        )
+                except Exception:
+                    pass
+
+                # NOTE: bankroll represents equity; do NOT subtract on open (prevents fake decay)
+                db.snapshot_ledger(self.conn, self.bankroll)
+        except Exception as e:
+            # If unique index blocks duplicates, just skip silently
+            if 'uq_open_pos_market_outcome_side' in str(e) or 'UNIQUE constraint failed' in str(e):
+                self.last_skip_reason = "duplicate_unique_index"
+                self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"], "MARKET", pos["size_usd"], status="skipped", error=self.last_skip_reason)
+                return -1
+            raise
+
+        self._log_outbox(mode, pos["market_slug"], pos["side"], pos["outcome"], "MARKET", pos["size_usd"], status="opened")
 
         return pos_id
 
