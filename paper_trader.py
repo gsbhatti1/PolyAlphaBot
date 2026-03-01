@@ -14,6 +14,18 @@ import db
 import config
 
 
+
+def _qinfo(q):
+    try:
+        t = type(q).__name__
+        if isinstance(q, (str, bytes)):
+            s = q.decode('utf-8','ignore') if isinstance(q, bytes) else q
+            s = s.replace('\n',' ').replace('\r',' ')
+            return t, s[:160]
+        return t, str(q)[:160]
+    except Exception as e:
+        return 'unknown', f'qinfo_error:{e}'
+
 def _sim_fill_price(side, bid, ask, size_usd, cfg):
     slip_bps = float(getattr(cfg, "SIM_SLIP_BPS_BASE", 8)) + float(getattr(cfg, "SIM_SLIP_BPS_PER_100USD", 4)) * (
         float(size_usd) / 100.0
@@ -249,7 +261,7 @@ class PaperTrader:
         size_usd = float(sizing.get("size_usd") or 0.0)
 
         # throttle (avoid spam): log at intervals as SKIPPED rows (no attempt row each tick)
-        throttle_sec = int(getattr(config, "CAP_THROTTLE_SEC", 60))
+        throttle_sec = int((getattr(config,"CAP_THROTTLE_SEC",60) or 60))
         log_every = int(getattr(config, "THROTTLE_LOG_EVERY_SEC", 60))
 
         if now < float(getattr(self, "cap_block_until", 0.0)):
@@ -298,7 +310,7 @@ class PaperTrader:
                 return -1
 
             if not isinstance(quote, dict):
-                self.last_skip_reason = "quote_invalid:not_dict"
+                qtype,qsnip=_qinfo(quote); self.last_skip_reason = f"quote_invalid:not_dict type={qtype} q={qsnip}"
                 self._update_outbox(outbox_id, "skipped", self.last_skip_reason, payload=str(quote))
                 return -1
 
