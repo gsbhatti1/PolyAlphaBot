@@ -251,6 +251,7 @@ class PaperTrader:
     # ---------- Execution (single-row outbox lifecycle) ----------
 
     def open_position(self, wallet: dict, trade: dict, sizing: dict) -> int:
+        self.last_skip_reason = 'open_position_returned_None'  # AUTOPATCH
         self.last_skip_reason = None
         mode = getattr(config, "EXECUTION_MODE", "PAPER")
         now = time.time()
@@ -584,6 +585,23 @@ class PaperTrader:
         stats = db.get_paper_stats(self.conn)
         open_positions = db.get_open_positions(self.conn)
         open_exposure = sum(float(p.get("size_usd") or 0.0) for p in open_positions)
+        # --- TRUTH_GUARD: bankroll cannot drift above starting + realized pnl - locked exposure ---
+        # If this trips, some logic is crediting principal without debiting it (fake profit).
+        realized_pnl = float(stats.get("total_pnl", 0.0) or 0.0)
+        locked = float(open_exposure or 0.0)
+        expected_max_cash = float(config.STARTING_BANKROLL) + realized_pnl - locked
+        if float(self.bankroll) > (expected_max_cash + 1e-6):
+            self.last_skip_reason = "TRUTH_GUARD_violation"
+            try:
+                import logging
+                logging.getLogger("polymarket-bot").error(
+                    "[TRUTH_GUARD] bankroll=%0.2f expected_max_cash=%0.2f realized_pnl=%0.4f locked=%0.2f",
+                    float(self.bankroll), expected_max_cash, realized_pnl, locked
+                )
+            except Exception:
+                pass
+            # freeze new positions by setting an extremely long throttle
+            self.pos_block_until = 1e18
 
         # truth-based return: use realized P&L from stats (DB has paper_positions.pnl)
         total_pnl = float(stats.get("total_pnl", stats.get("pnl", 0.0)) or 0.0)

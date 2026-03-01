@@ -35,7 +35,7 @@ MAX_MARKET_POSITIONS = 5          # max open positions per (market_slug,outcome,
 
 # --- throttle controls (paper/live parity: keep but tune) ---
 CAP_THROTTLE_SEC = 1              # was defaulting to 60; keep tiny for speed
-THROTTLE_LOG_EVERY_SEC = 10       # log throttle at most every 10s (avoid spam)
+THROTTLE_LOG_EVERY_SEC = 15       # log throttle at most every 10s (avoid spam)
 
 # ── Scanner Defaults (who to follow) ───────────────────────────────────────
 DEFAULT_SCAN_LIMIT = 1000         # pull more wallets
@@ -59,12 +59,12 @@ MAX_POSITION_PCT = 0.10           # 35% is too chunky for high-frequency; use 10
 
 # ── Safety rails (prevent blowups + keep flow) ──────────────
 MAX_TRADES_PER_HOUR = 300         # raise throughput ceiling
-MAX_OPEN_POSITIONS = 80           # single source of truth (remove MAX_POSITIONS_OPEN)
-MAX_OPEN_EXPOSURE_USD = 2000      # matches higher open count
+MAX_OPEN_POSITIONS = 30           # single source of truth (remove MAX_POSITIONS_OPEN)
+MAX_OPEN_EXPOSURE_USD = 1000      # matches higher open count
 MAX_MARKET_EXPOSURE_USD = 150     # per (market,outcome,side)
-MAX_MARKET_POSITIONS = 8
-COOLDOWN_SECONDS_PER_MARKET = 5   # faster recycle (was 20)
-WALLET_COOLDOWN_SEC = 120         # 2 minutes (was 1800!)
+MAX_MARKET_POSITIONS = 5
+COOLDOWN_SECONDS_PER_MARKET = 10   # faster recycle (was 20)
+WALLET_COOLDOWN_SEC = 180         # 2 minutes (was 1800!)
 
 # ── Alerts ─────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -120,4 +120,4 @@ ALERTS_SUPPRESS_SUMMARY = True
 
 # --- Paper position auto-close (prevents cap deadlock) ---
 AUTO_CLOSE_SEC = 60              # 15 minutes
-AUTO_CLOSE_PRICE_MODE = "entry"   # unblock without PnL distortion
+AUTO_CLOSE_PRICE_MODE = "mid"
