@@ -26,3 +26,4 @@ config_secrets.py
 *.bak.*
 *.bak_*
 backups/
+paper_trader.py.autopatch_live_*.bak
