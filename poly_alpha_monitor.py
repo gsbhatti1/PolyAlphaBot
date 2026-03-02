@@ -48,6 +48,29 @@ DEAD_WALLET_DAYS = getattr(config, 'DEAD_WALLET_DAYS', 5)
 MAINTENANCE_EVERY_SEC = getattr(config, 'MAINTENANCE_EVERY_SEC', 3600)
 SCAN_REFRESH_EVERY_SEC = getattr(config, 'SCAN_REFRESH_EVERY_SEC', 21600)
 SCAN_LIMIT = getattr(config, 'SCAN_LIMIT', 1000)
+
+# --- SIMPLE DB TRUTH SNAPSHOT ---
+def build_portfolio_snapshot_dbtruth(conn):
+    try:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(bankroll),0) FROM paper_ledger"
+        ).fetchone()
+        bankroll = float(row[0] or 0.0)
+
+        row = conn.execute(
+            "SELECT COUNT(*) FROM paper_positions WHERE lower(status)='open'"
+        ).fetchone()
+        open_cnt = int(row[0] or 0)
+
+        return (
+            "📊 Poly Alpha Portfolio Snapshot\n\n"
+            f"💰 Bankroll: ${bankroll:,.2f}\n"
+            f"📦 Open Positions: {open_cnt}\n\n"
+            "Controlled. Adaptive. Institutional."
+        )
+
+    except Exception as e:
+        return f"Snapshot error: {e}"
 SCANNER_SCRIPT = getattr(config, 'SCANNER_SCRIPT', 'poly_alpha_scanner.py')
 
 REFILL_FROM_INACTIVE = getattr(config, 'REFILL_FROM_INACTIVE', True)
@@ -838,48 +861,4 @@ if __name__ == "__main__":
     send_start_notice_once_per_hour()
     main()
 
-def build_portfolio_snapshot_dbtruth(conn):
-    # SQLite truth snapshot
-    row = conn.execute("SELECT starting_capital FROM capital_account WHERE id=1").fetchone()
-    start = float(row[0] if row else 0.0)
-
-    row = conn.execute(
-        "SELECT COALESCE(SUM(pnl),0) as realized, "
-        "SUM(CASE WHEN pnl>0 THEN 1 ELSE 0 END) as wins, "
-        "SUM(CASE WHEN pnl<0 THEN 1 ELSE 0 END) as losses, "
-        "COUNT(*) as closed_cnt "
-        "FROM paper_positions WHERE lower(status)='closed'"
-    ).fetchone()
-    realized = float(row[0] or 0.0)
-    wins = int(row[1] or 0)
-    losses = int(row[2] or 0)
-    closed_cnt = int(row[3] or 0)
-    win_rate = (100.0 * wins / closed_cnt) if closed_cnt else 0.0
-
-    row = conn.execute(
-        "SELECT COUNT(*) as open_cnt, COALESCE(SUM(size_usd),0) as locked "
-        "FROM paper_positions WHERE lower(status)='open'"
-    ).fetchone()
-    open_cnt = int(row[0] or 0)
-    locked = float(row[1] or 0.0)
-
-    row = conn.execute(
-        "SELECT bankroll FROM paper_ledger ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    cash = float(row[0] if row else 0.0)
-
-    equity = cash + locked
-    ret_pct = (100.0 * (equity - start) / start) if start else 0.0
-
-    msg = (
-        "📊 Poly Alpha Portfolio Snapshot\n\n"
-        f"💰 Bankroll (Cash): ${cash:,.2f}\n"
-        f"🟣 Equity (Cash+Locked): ${equity:,.2f}\n"
-        f"🟢 Realized PnL: ${realized:,.2f}  ({ret_pct:+.2f}%)\n"
-        f"📦 Open Positions: {open_cnt}\n"
-        f"⚖️ Exposure (Locked): ${locked:,.2f}\n"
-        f"✅ Wins/Losses: {wins}/{losses}  Win rate: {win_rate:.1f}%\n\n"
-        "Controlled. Adaptive. Institutional."
-    )
-    return msg
 
