@@ -1,22 +1,28 @@
-# Secrets
-.env*
-*.env
-
-# Local logs / runtime
-*.log
-*.pid
+# Python
 __pycache__/
 *.pyc
-
-# Local DBs
-*.db
-*.db-shm
-*.db-wal
+*.pyo
+*.pyd
 
 # Virtualenv
 venv/
 
-# OS/editor junk
-.DS_Store
-*.swp
-*.swo
+# Databases
+*.db
+*.db.bak*
+*.db.backup*
+
+# Logs
+logs/
+*.log
+monitor.log
+monitor_err.log
+poly_alpha_aggressive.log
+
+# Secrets (we'll add later)
+config_secrets.py
+
+# Backups
+*.bak.*
+*.bak_*
+backups/

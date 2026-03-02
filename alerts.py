@@ -1,118 +1,187 @@
-"""
-Alert dispatch — Telegram, Discord, and console.
-"""
+import os, asyncio, logging, time
 import httpx
-import logging
-import os
-import httpx
-import config
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("polymarket-bot")
 
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
+DISCORD_WEBHOOK    = os.getenv("DISCORD_WEBHOOK_URL", "")
 
-async def send_telegram(message: str, client: httpx.AsyncClient | None = None):
-    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
-        logger.debug("Telegram not configured")
+def _tg_url():
+    return f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+
+def _send(text: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
-    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": config.TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True,
-    }
-    managed_client = client is None
-    c = client or httpx.AsyncClient(timeout=10.0)
     try:
-        response = await c.post(url, json=payload)
-        response.raise_for_status()
-        logger.info("Telegram alert sent successfully")
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Telegram HTTP error {e.response.status_code}: {e.response.text}")
-    except httpx.RequestError as e:
-        logger.error(f"Telegram request error: {e}")
+        with httpx.Client(timeout=8) as c:
+            c.post(_tg_url(), json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML"
+            })
     except Exception as e:
-        logger.error(f"Unexpected Telegram error: {e}")
-    finally:
-        if managed_client:
-            await c.aclose()
+        logger.warning(f"Telegram send failed: {e}")
 
+def send_trade_opened(market_slug, market_question, side, outcome, size_usd, entry_price, bankroll, kelly_fraction):
+    q = (market_question or market_slug or "")[:55]
+    emoji = "🟢"
+    ts = time.strftime("%H:%M UTC", time.gmtime())
+    text = (
+        f"{emoji} <b>TRADE OPENED</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📌 <b>{q}</b>\n"
+        f"🎯 Side: <b>{side} {outcome}</b>\n"
+        f"💵 Size: <b>${size_usd:.2f}</b>\n"
+        f"📈 Entry: <b>${entry_price:.4f}</b>\n"
+        f"⚡ Kelly: <b>{kelly_fraction*100:.0f}%</b>\n"
+        f"🏦 Bankroll: <b>${bankroll:.2f}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 {ts}"
+    )
+    _send(text)
 
-async def send_discord(message: str, client: httpx.AsyncClient | None = None):
-    if not config.DISCORD_WEBHOOK_URL:
-        logger.debug("Discord not configured")
+def send_trade_closed(market_slug, market_question, side, outcome, size_usd, entry_price, exit_price, pnl, bankroll):
+    q = (market_question or market_slug or "")[:55]
+    if pnl > 0:
+        emoji = "✅"
+        result = f"+${pnl:.2f} WIN"
+    elif pnl < 0:
+        emoji = "❌"
+        result = f"-${abs(pnl):.2f} LOSS"
+    else:
+        emoji = "➖"
+        result = "$0.00 FLAT"
+    ts = time.strftime("%H:%M UTC", time.gmtime())
+    text = (
+        f"🔴 <b>TRADE CLOSED</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📌 <b>{q}</b>\n"
+        f"🎯 Side: <b>{side} {outcome}</b>\n"
+        f"💵 Size: <b>${size_usd:.2f}</b>\n"
+        f"📊 PnL: <b>{result}</b> {emoji}\n"
+        f"📈 Entry: ${entry_price:.4f} → Exit: ${exit_price:.4f}\n"
+        f"🏦 Bankroll: <b>${bankroll:.2f}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 {ts}"
+    )
+    _send(text)
+
+def send_hourly_report(bankroll, starting_bankroll, pnl_today, open_count, locked_usd, wins, losses, open_positions):
+    win_rate = (wins/(wins+losses)*100) if (wins+losses) > 0 else 0
+    pnl_pct = (pnl_today/starting_bankroll*100) if starting_bankroll > 0 else 0
+    pnl_sign = "+" if pnl_today >= 0 else ""
+    ts = time.strftime("%H:%M UTC", time.gmtime())
+    
+    pos_lines = ""
+    for p in (open_positions or [])[:5]:
+        slug = str(p.get("market_slug",""))[:30]
+        side = p.get("side","")
+        sz   = p.get("size_usd", 0)
+        ep   = p.get("entry_price", 0)
+        pos_lines += f"  • {slug} | {side} ${sz:.0f} @ ${ep:.3f}\n"
+    
+    text = (
+        f"📊 <b>HOURLY REPORT</b> — {ts}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🏦 Bankroll:    <b>${bankroll:.2f}</b>\n"
+        f"📈 PnL:         <b>{pnl_sign}${pnl_today:.2f} ({pnl_sign}{pnl_pct:.2f}%)</b>\n"
+        f"📦 Open:        <b>{open_count}</b> positions (${locked_usd:.2f} locked)\n"
+        f"✅ Wins: <b>{wins}</b>  ❌ Losses: <b>{losses}</b>\n"
+        f"🎯 Win Rate:    <b>{win_rate:.1f}%</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+    )
+    if pos_lines:
+        text += f"<b>Open positions:</b>\n{pos_lines}"
+    _send(text)
+
+def send_startup(bankroll):
+    ts = time.strftime("%H:%M UTC", time.gmtime())
+    text = (
+        f"🚀 <b>PolyAlphaBot STARTED</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🏦 Bankroll: <b>${bankroll:.2f}</b>\n"
+        f"⚙️ Mode: <b>PAPER</b>\n"
+        f"💵 Max per trade: <b>$10</b>\n"
+        f"🔄 Cooldown: <b>3 min</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 {ts}"
+    )
+    _send(text)
+
+def send_alert(msg: str):
+    _send(f"⚠️ <b>ALERT</b>\n{msg}")
+
+# Legacy compatibility
+def send_telegram(msg: str):
+    _send(msg)
+
+async def send_telegram_async(msg: str):
+    _send(msg)
+
+async def send_discord(msg: str):
+    if not DISCORD_WEBHOOK:
         return
-    managed_client = client is None
-    c = client or httpx.AsyncClient(timeout=10.0)
     try:
-        response = await c.post(
-            config.DISCORD_WEBHOOK_URL,
-            json={"content": message},
-            timeout=10,
-        )
-        response.raise_for_status()
-        logger.info("Discord alert sent successfully")
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Discord HTTP error {e.response.status_code}: {e.response.text}")
-    except httpx.RequestError as e:
-        logger.error(f"Discord request error: {e}")
+        async with httpx.AsyncClient(timeout=8) as c:
+            await c.post(DISCORD_WEBHOOK, json={"content": msg})
     except Exception as e:
-        logger.error(f"Unexpected Discord error: {e}")
-    finally:
-        if managed_client:
-            await c.aclose()
+        logger.warning(f"Discord send failed: {e}")
 
+# ── Legacy sync wrapper (monitor calls this) ──────────────────────────────
+def send_telegram_sync(msg: str):
+    """Direct wrapper — monitor uses this for all alerts."""
+    _send(msg)
 
-async def send_alert(message: str, client: httpx.AsyncClient | None = None):
-    """Send to all configured channels."""
-    await send_telegram(message, client)
-    await send_discord(message, client)
+# ── Trade alert formatter (monitor calls this on new trade) ──────────────
+def format_new_trade_alert(wallet: dict, trade: dict, paper_action: dict) -> str:
+    market_q = str(trade.get("market_question") or trade.get("market_slug") or "")[:55]
+    side      = str(trade.get("side",""))
+    outcome   = str(trade.get("outcome",""))
+    size_usd  = float((paper_action or {}).get("size_usd") or trade.get("size_usd") or 0)
+    entry     = float((paper_action or {}).get("entry_price") or trade.get("price") or 0)
+    bankroll  = float((paper_action or {}).get("bankroll") or 0)
+    kelly     = float((paper_action or {}).get("kelly_fraction") or 0)
+    wallet_u  = str(wallet.get("username") or wallet.get("address",""))[:20]
+    ts        = time.strftime("%H:%M UTC", time.gmtime())
+    return (
+        f"🟢 <b>TRADE OPENED</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📌 <b>{market_q}</b>\n"
+        f"🎯 Side: <b>{side} {outcome}</b>\n"
+        f"💵 Size: <b>${size_usd:.2f}</b>\n"
+        f"📈 Entry: <b>${entry:.4f}</b>\n"
+        f"⚡ Kelly: <b>{kelly*100:.0f}%</b>\n"
+        f"👛 Copying: <b>{wallet_u}</b>\n"
+        f"🏦 Bankroll: <b>${bankroll:.2f}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 {ts}"
+    )
 
-
-def format_new_trade_alert(wallet: dict, trade: dict, paper_action: dict | None = None) -> str:
-    """Format a trade detection into an alert message."""
-    addr = wallet.get("address", "?")[:10]
-    name = wallet.get("username", addr)
-    score = wallet.get("alpha_score", 0)
-
-    market = trade.get("market_question", trade.get("market", "?"))
-    outcome = trade.get("outcome", "?")
-    side = trade.get("side", "?")
-    size = trade.get("size_usd", trade.get("size", 0))
-    price = trade.get("price", 0)
-
-    lines = [
-        f"🔔 *New Trade Detected*",
-        f"Wallet: `{name}` (α {score:.2f})",
-        f"Market: {market[:80]}",
-        f"Side: {side} {outcome} @ {float(price):.2f}",
-        f"Size: ${float(size):,.0f}",
-    ]
-
-    if paper_action:
-        lines.append("")
-        lines.append(f"📝 *Paper Trade*")
-        lines.append(f"Size: ${paper_action['size_usd']:,.0f} "
-                      f"(Kelly: {paper_action['kelly_fraction']:.1%})")
-        lines.append(f"Bankroll: ${paper_action['bankroll']:,.0f}")
-
-    return "\n".join(lines)
-def send_telegram_sync(message: str) -> None:
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
-
-    if not token or not chat_id:
-        raise RuntimeError("Missing TELEGRAM_BOT_TOKEN or TELEGRAM_CHAT_ID")
-
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    data = {
-        "chat_id": chat_id,
-        "text": message,
-    }
-
-    with httpx.Client(timeout=15.0) as client:
-        r = client.post(url, data=data)
-        if r.status_code != 200:
-            raise RuntimeError(
-                f"Telegram HTTP {r.status_code}: {r.text[:300]}"
-            )
+# ── Close alert (call this when position closes) ─────────────────────────
+def format_close_alert(pos: dict, bankroll: float) -> str:
+    market_q  = str(pos.get("market_question") or pos.get("market_slug") or "")[:55]
+    side      = str(pos.get("side",""))
+    outcome   = str(pos.get("outcome",""))
+    size_usd  = float(pos.get("size_usd") or 0)
+    entry     = float(pos.get("entry_price") or 0)
+    exit_p    = float(pos.get("exit_price") or 0)
+    pnl       = float(pos.get("pnl") or 0)
+    ts        = time.strftime("%H:%M UTC", time.gmtime())
+    if pnl > 0:
+        result = f"+${pnl:.2f} ✅ WIN"
+    elif pnl < 0:
+        result = f"-${abs(pnl):.2f} ❌ LOSS"
+    else:
+        result  = "$0.00 ➖ FLAT"
+    return (
+        f"🔴 <b>TRADE CLOSED</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"📌 <b>{market_q}</b>\n"
+        f"🎯 Side: <b>{side} {outcome}</b>\n"
+        f"💵 Size: <b>${size_usd:.2f}</b>  |  PnL: <b>{result}</b>\n"
+        f"📈 Entry: ${entry:.4f} → Exit: ${exit_p:.4f}\n"
+        f"🏦 Bankroll: <b>${bankroll:.2f}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🕐 {ts}"
+    )

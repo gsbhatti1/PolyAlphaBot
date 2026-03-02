@@ -17,29 +17,54 @@ FORCE_PAPER_EXECUTION = True
 FORCE_MIN_TRADE_USD = 1
 FORCE_MAX_PER_HOUR = 10
 
+# ── Execution Mode (Paper ≈ Live) ──────────────────────────────────────────
+EXECUTION_MODE = "PAPER"          # PAPER / SHADOW / LIVE
+LIVE_CAPITAL_FRACTION = 0.01      # 1% when LIVE
+
+# Market-order realism (paper sim)
+SIM_LATENCY_MS_MIN = 250
+SIM_LATENCY_MS_MAX = 1200
+SIM_SLIP_BPS_BASE = 8
+SIM_SLIP_BPS_PER_100USD = 4
+SIM_FEE_BPS = 10                  # adjust to real later
+
+# --- Risk caps (paper) ---
+MAX_MARKET_EXPOSURE_USD = 100     # cap per (market_slug,outcome,side)
+# Optional: cap count too (safety)
+MAX_MARKET_POSITIONS = 5          # max open positions per (market_slug,outcome,side)
+
+# --- throttle controls (paper/live parity: keep but tune) ---
+CAP_THROTTLE_SEC = 1              # was defaulting to 60; keep tiny for speed
+THROTTLE_LOG_EVERY_SEC = 15       # log throttle at most every 10s (avoid spam)
+
 # ── Scanner Defaults (who to follow) ───────────────────────────────────────
 DEFAULT_SCAN_LIMIT = 1000         # pull more wallets
 MIN_PNL = 0                       # include all
 MIN_TRADES = 1                    # include new wallets
 MIN_WIN_RATE = 0.49               # very permissive
-MAX_AVG_BET = 500_000             # allow whales for now
+MAX_AVG_BET = 5000                      # ignore whales betting over 5k avg
 MIN_ACTIVE_DAYS = 1               # allow recent
 TOP_VOLUME_EXCLUDE = 0            # include visible wallets for action
 
-# ── Monitor Defaults (how often + what to alert/act on) ────────────────────
-POLL_INTERVAL = 5                 # seconds between polls (aggressive)
-MAX_WATCH_WALLETS = 150           # monitor more wallets
-MIN_TRADE_SIZE = 5                # minimum detected trade size (USD)
+# ── Monitor Defaults ───────────────────────────────────────
+POLL_INTERVAL = 3                 # faster loop (was 5)
+MAX_WATCH_WALLETS = 150
+MIN_TRADE_SIZE = 5                      # min $5
 
-# ── Paper Trader Defaults (sizing) ─────────────────────────────────────────
-STARTING_BANKROLL = 10_000
-DEFAULT_KELLY_FRACTION = 1.0      # full Kelly (paper only)
-MAX_POSITION_PCT = 0.35           # up to 35% of bankroll per trade (paper only)
+# ── Paper Trader Defaults (sizing) ──────────────────────────
+STARTING_BANKROLL = 1000                # reset
+DEFAULT_KELLY_FRACTION = 0.35     # full kelly is explosive; 0.35 is aggressive but survivable
+MAX_PAPER_TRADE_USD = 10                # HARD cap 0 per trade
+MAX_POSITION_PCT = 0.10           # 35% is too chunky for high-frequency; use 10%
 
-# Safety rails so “aggressive” doesn’t go insane
-MAX_TRADES_PER_HOUR = 60
-MAX_POSITIONS_OPEN = 30
-COOLDOWN_SECONDS_PER_MARKET = 20
+# ── Safety rails (prevent blowups + keep flow) ──────────────
+MAX_TRADES_PER_HOUR = 300         # raise throughput ceiling
+MAX_OPEN_POSITIONS = 10                 # max 10 open positions
+MAX_OPEN_EXPOSURE_USD = 100             # max $100 locked total
+MAX_MARKET_EXPOSURE_USD = 150     # per (market,outcome,side)
+MAX_MARKET_POSITIONS = 5
+COOLDOWN_SECONDS_PER_MARKET = 10   # faster recycle (was 20)
+WALLET_COOLDOWN_SEC = 180             # 3 min cooldown
 
 # ── Alerts ─────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -63,3 +88,34 @@ REFILL_FROM_INACTIVE = True          # refill from inactive wallets already in D
 SCAN_REFRESH_EVERY_SEC = 21600   # 6 hours
 SCAN_LIMIT = 1000                # leaderboard entries to scan
 SCANNER_SCRIPT = "poly_alpha_scanner.py"
+
+MIRROR_ALWAYS = True
+
+
+TELEGRAM_PORTFOLIO_EVERY_SEC = 600
+
+TELEGRAM_PORTFOLIO_LAST_N = 5
+
+TELEGRAM_CMD_POLL_SEC = 5
+
+REPORT_DELTA_BANKROLL = 25
+
+REPORT_DELTA_PNL = 10
+
+REPORT_DELTA_OPEN_POS = 1
+
+REPORT_DELTA_EXPOSURE = 50
+
+REPORT_THROTTLE_SEC = 30
+
+IGNORE_OLD_TRADES_ON_BOOT_SEC = 86400  # ignore trades older than 24h on boot
+
+MAX_TELEGRAM_ALERTS_PER_MIN = 12
+
+ALERTS_SUPPRESS_SUMMARY = True
+
+# --- Paper position auto-close (prevents cap deadlock) ---
+AUTO_CLOSE_SEC = 60              # 15 minutes
+AUTO_CLOSE_PRICE_MODE = "mid"
+TELEGRAM_NOTIFY_DETECTIONS = False
+TELEGRAM_NOTIFY_EXECUTIONS = True
