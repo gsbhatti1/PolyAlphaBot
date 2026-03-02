@@ -11,8 +11,20 @@ import random
 import json
 
 import db
+from config import EXECUTION_MODE, MAX_PAPER_TRADE_USD
+try:
+    from live_trader import LiveTrader
+except Exception:
+    LiveTrader = None
+
 import config
 
+from config import EXECUTION_MODE, MAX_PAPER_TRADE_USD
+
+try:
+    from live_trader import LiveTrader
+except Exception:
+    LiveTrader = None
 
 
 def _qinfo(q):
@@ -47,6 +59,15 @@ def _sim_latency_sleep(cfg):
     hi = int(getattr(cfg, "SIM_LATENCY_MS_MAX", 1200))
     ms = random.randint(min(lo, hi), max(lo, hi))
     time.sleep(ms / 1000.0)
+
+
+live_trader = None
+if EXECUTION_MODE == "LIVE" and LiveTrader is not None:
+    try:
+        live_trader = LiveTrader()
+    except Exception as e:
+        logger.exception("Failed to init LiveTrader: %s", e)
+        live_trader = None
 
 
 class PaperTrader:
@@ -339,10 +360,43 @@ class PaperTrader:
                 )
             except Exception:
                 pass
+            # LIVE routing: call real CLOB executor instead of simulator
+            if mode == "LIVE" and live_trader is not None:
+                try:
+                    market_id = quote.get("marketId") or quote.get("market_id") or quote.get("id")
+                    token_id = quote.get("tokenId") or quote.get("token_id") or quote.get("outcomeId")
+                    side_live = str(pos.get("side", "") or side).upper()
+                    size_usd_live = float(min(pos.get("size_usd", 0.0) or 0.0, MAX_PAPER_TRADE_USD))
 
-            _sim_latency_sleep(config)
-            fill_price, slip_bps, fee_usd = _sim_fill_price(pos["side"], bid, ask, pos["size_usd"], config)
-            pos["entry_price"] = float(fill_price)
+                    if size_usd_live <= 0:
+                        self.last_skip_reason = "live_invalid_size"
+                        self._update_outbox(outbox_id, "skipped", self.last_skip_reason, payload=json.dumps(quote))
+                        return -1
+
+                    live_res = live_trader.open_position(
+                        market_id=market_id,
+                        token_id=token_id,
+                        side=side_live,
+                        size_usd=size_usd_live,
+                        price=mid,
+                    )
+
+                    if not live_res or not live_res.get("order_id"):
+                        self.last_skip_reason = "live_order_failed"
+                        self._update_outbox(outbox_id, "error", self.last_skip_reason, payload=json.dumps(quote))
+                        return -1
+
+                    pos["entry_price"] = float(live_res.get("avg_fill_price", mid))
+                    pos["size_usd"] = float(live_res.get("filled_size", size_usd_live))
+                except Exception as e:
+                    self.last_skip_reason = f"live_exception:{e.__class__.__name__}"
+                    self._update_outbox(outbox_id, "error", self.last_skip_reason, payload=json.dumps(quote))
+                    return -1
+            else:
+                _sim_latency_sleep(config)
+                fill_price, slip_bps, fee_usd = _sim_fill_price(pos["side"], bid, ask, pos["size_usd"], config)
+                pos["entry_price"] = float(fill_price)
+
 
             # duplicate guard BEFORE opening
             row_dup = self.conn.execute(
