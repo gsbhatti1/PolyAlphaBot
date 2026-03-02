@@ -1,0 +1,177 @@
+"""
+Alert dispatch — Telegram, Discord, and console.
+"""
+import httpx
+import logging
+import os
+import httpx
+import config
+
+logger = logging.getLogger(__name__)
+
+
+async def send_telegram(message: str, client: httpx.AsyncClient | None = None):
+    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+        logger.debug("Telegram not configured")
+        return
+    url = f"https://api.telegram.org/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": config.TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown",
+        "disable_web_page_preview": True,
+    }
+    managed_client = client is None
+    c = client or httpx.AsyncClient(timeout=10.0)
+    try:
+        response = await c.post(url, json=payload)
+        response.raise_for_status()
+        logger.info("Telegram alert sent successfully")
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Telegram HTTP error {e.response.status_code}: {e.response.text}")
+    except httpx.RequestError as e:
+        logger.error(f"Telegram request error: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected Telegram error: {e}")
+    finally:
+        if managed_client:
+            await c.aclose()
+
+
+async def send_discord(message: str, client: httpx.AsyncClient | None = None):
+    if not config.DISCORD_WEBHOOK_URL:
+        logger.debug("Discord not configured")
+        return
+    managed_client = client is None
+    c = client or httpx.AsyncClient(timeout=10.0)
+    try:
+        response = await c.post(
+            config.DISCORD_WEBHOOK_URL,
+            json={"content": message},
+            timeout=10,
+        )
+        response.raise_for_status()
+        logger.info("Discord alert sent successfully")
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Discord HTTP error {e.response.status_code}: {e.response.text}")
+    except httpx.RequestError as e:
+        logger.error(f"Discord request error: {e}")
+    except Exception as e:
+        logger.error(f"Unexpected Discord error: {e}")
+    finally:
+        if managed_client:
+            await c.aclose()
+
+
+async def send_alert(message: str, client: httpx.AsyncClient | None = None):
+    """Send to all configured channels."""
+    await send_telegram(message, client)
+    await send_discord(message, client)
+
+
+def format_new_trade_alert(wallet: dict, trade: dict, paper_action: dict | None = None) -> str:
+    """Very visual Telegram alert (Markdown)."""
+
+    def safe(s) -> str:
+        return (str(s) if s is not None else "").replace("\n", " ").strip()
+
+    def money(x) -> str:
+        try:
+            return f"${float(x):,.0f}"
+        except Exception:
+            return "$0"
+
+    def num(x, n=3) -> str:
+        try:
+            return f"{float(x):.{n}f}"
+        except Exception:
+            return "0"
+
+    # ── Wallet
+    addr = safe(wallet.get("address", "?"))
+    addr_short = addr[:10] if addr else "?"
+    name = safe(wallet.get("username") or addr_short)
+
+    alpha = wallet.get("alpha_score", wallet.get("alpha", wallet.get("score", 0))) or 0
+    try:
+        alpha_s = f"{float(alpha):.3f}"
+    except Exception:
+        alpha_s = "0.000"
+
+    win_rate = wallet.get("win_rate", None)
+    pnl = wallet.get("pnl", None)
+
+    stats_bits = [f"α {alpha_s}"]
+    if isinstance(win_rate, (int, float)):
+        stats_bits.append(f"Win {float(win_rate)*100:.1f}%")
+    if isinstance(pnl, (int, float)):
+        stats_bits.append(f"PnL {float(pnl):+,.0f}")
+
+    # ── Trade
+    market = safe(trade.get("market_question", trade.get("market", "?")))
+    slug = safe(trade.get("market_slug", trade.get("slug", "")))
+    outcome = safe(trade.get("outcome", "?"))
+    side_raw = safe(trade.get("side", "?"))
+    size = trade.get("size_usd", trade.get("size", 0))
+    price = trade.get("price", 0)
+
+    side_up = side_raw.upper()
+    if side_up in ("BUY", "YES", "LONG"):
+        header = "🟢 *NEW DETECTION — BUY*"
+        side_tag = "BUY"
+    elif side_up in ("SELL", "NO", "SHORT"):
+        header = "🔴 *NEW DETECTION — SELL*"
+        side_tag = "SELL"
+    else:
+        header = "🟡 *NEW DETECTION — TRADE*"
+        side_tag = side_raw or "TRADE"
+
+    lines = []
+    lines.append(header)
+    lines.append(f"👤 Wallet: `{name}`  ({' · '.join(stats_bits)})")
+    lines.append(f"🎯 Market: {market[:160]}")
+    if slug:
+        lines.append(f"🔗 Slug: `{slug[:60]}`")
+
+    lines.append("")
+    lines.append("📥 *Detected Trade*")
+    lines.append(f"- Side: *{side_tag}*")
+    lines.append(f"- Outcome: *{outcome}*")
+    lines.append(f"- Price: `{num(price, 3)}`")
+    lines.append(f"- Size: *{money(size)}*")
+
+    # ── Paper action (OPENED vs SKIPPED)
+    if paper_action:
+        status = safe(paper_action.get("status", "")).upper()
+        psize = paper_action.get("size_usd", 0)
+        bankroll = paper_action.get("bankroll", None)
+        kelly = paper_action.get("kelly_fraction", None)
+        reason = paper_action.get("reason", None)
+
+        lines.append("")
+        lines.append("🧾 *Paper Execution*")
+
+        if status == "OPENED" and float(psize or 0) > 0:
+            lines.append("- Status: ✅ *OPENED*")
+            lines.append(f"- Paper Size: *{money(psize)}*")
+        else:
+            lines.append("- Status: ⛔ *SKIPPED*")
+            if reason:
+                lines.append(f"- Reason: `{safe(reason)[:90]}`")
+
+        if kelly is not None:
+            try:
+                lines.append(f"- Kelly: `{float(kelly):.3f}`")
+            except Exception:
+                pass
+
+        if bankroll is not None:
+            try:
+                lines.append(f"- Bankroll After: *${float(bankroll):,.2f}*")
+            except Exception:
+                pass
+
+    lines.append("")
+    lines.append("—")
+    lines.append(f"`{addr_short}`")
+    return "\n".join(lines)

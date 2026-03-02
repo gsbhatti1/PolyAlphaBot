@@ -1,0 +1,335 @@
+"""
+Polymarket API client.
+
+Matches the official Polymarket API docs (2025):
+  - Data API:  https://data-api.polymarket.com
+    - GET /v1/leaderboard     (timePeriod, orderBy, limit<=50, offset)
+    - GET /activity           (user, limit, offset)
+    - GET /positions          (user, sizeThreshold)
+    - GET /trades             (user, limit, offset)
+  - Gamma API: https://gamma-api.polymarket.com
+    - GET /markets            (slug, active, closed, limit)
+    - GET /profiles/{address}
+    - GET /search             (query)
+"""
+import asyncio
+import time
+from typing import Any
+
+import httpx
+
+import config
+
+_last_request = 0.0
+
+
+async def _throttle():
+    global _last_request
+    elapsed = time.monotonic() - _last_request
+    if elapsed < config.REQUEST_DELAY:
+        await asyncio.sleep(config.REQUEST_DELAY - elapsed)
+    _last_request = time.monotonic()
+
+
+async def _get(client: httpx.AsyncClient, url: str,
+               params: dict | None = None) -> Any:
+    """GET with throttle + retry."""
+    for attempt in range(config.MAX_RETRIES):
+        await _throttle()
+        try:
+            r = await client.get(url, params=params, timeout=20)
+            if r.status_code == 429:
+                wait = 2 ** (attempt + 1)
+                await asyncio.sleep(wait)
+                continue
+            r.raise_for_status()
+            return r.json()
+        except (httpx.HTTPStatusError, httpx.ReadTimeout) as e:
+            if attempt == config.MAX_RETRIES - 1:
+                raise
+            await asyncio.sleep(2 ** attempt)
+    return None
+
+
+# ── Leaderboard ────────────────────────────────────────────────────────────
+# Endpoint: GET https://data-api.polymarket.com/v1/leaderboard
+# Params:   timePeriod (DAY|WEEK|MONTH|ALL), orderBy (PNL|VOL),
+#           limit (1-50), offset (0-1000), category (OVERALL|...)
+# Response: [ { rank, proxyWallet, userName, vol, pnl, profileImage,
+#               xUsername, verifiedBadge } ]
+
+async def fetch_leaderboard(client: httpx.AsyncClient,
+                            limit: int = 50,
+                            offset: int = 0,
+                            time_period: str = "ALL",
+                            order_by: str = "PNL") -> list[dict]:
+    """Fetch profit leaderboard. Max 50 per page."""
+    data = await _get(
+        client,
+        f"{config.DATA_API}/v1/leaderboard",
+        params={
+            "timePeriod": time_period,
+            "orderBy": order_by,
+            "limit": min(limit, 50),
+            "offset": offset,
+        },
+    )
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return data
+    return data.get("results", data.get("leaderboard", []))
+
+
+async def fetch_leaderboard_paginated(client: httpx.AsyncClient,
+                                       total: int = 200,
+                                       time_period: str = "ALL",
+                                       order_by: str = "PNL") -> list[dict]:
+    """Page through leaderboard (50 per page) to get `total` entries."""
+    results = []
+    page_size = 50  # API max is 50
+    for offset in range(0, total, page_size):
+        batch = await fetch_leaderboard(
+            client, limit=page_size, offset=offset,
+            time_period=time_period, order_by=order_by,
+        )
+        if not batch:
+            break
+        results.extend(batch)
+        if len(batch) < page_size:
+            break
+    return results[:total]
+
+
+# ── Volume Leaderboard (for exclusion list) ────────────────────────────────
+
+async def fetch_top_volume_addresses(client: httpx.AsyncClient,
+                                      top_n: int = 500) -> set[str]:
+    """Get addresses of top-N wallets by volume (to exclude)."""
+    results = await fetch_leaderboard_paginated(
+        client, total=top_n, order_by="VOL",
+    )
+    return {
+        w.get("proxyWallet", "").lower()
+        for w in results if w.get("proxyWallet")
+    }
+
+
+# ── Profile (Gamma API) ───────────────────────────────────────────────────
+# Endpoint: GET https://gamma-api.polymarket.com/profiles/{address}
+
+async def fetch_profile(client: httpx.AsyncClient,
+                        address: str) -> dict | None:
+    """Fetch user profile from Gamma API."""
+    try:
+        return await _get(client, f"{config.GAMMA_API}/profiles/{address}")
+    except Exception:
+        return None
+
+
+# ── Trading Activity (Data API) ────────────────────────────────────────────
+# Endpoint: GET https://data-api.polymarket.com/activity
+# Params:   user (address, required), limit, offset, type, conditionId, side
+# Response: [ { proxyWallet, timestamp, conditionId, type, size, usdcSize,
+#               transactionHash, price, asset, side, outcomeIndex,
+#               title, slug, icon, eventSlug, outcome,
+#               name, pseudonym, bio, profileImage } ]
+
+async def fetch_activity(client: httpx.AsyncClient,
+                         address: str,
+                         limit: int = 100,
+                         offset: int = 0) -> list[dict]:
+    """Fetch trade activity for a wallet."""
+    try:
+        data = await _get(
+            client,
+            f"{config.DATA_API}/activity",
+            params={"user": address, "limit": limit, "offset": offset},
+        )
+    except Exception:
+        data = None
+
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return data
+    return data.get("history", data.get("activity", data.get("results", [])))
+
+
+async def fetch_all_activity(client: httpx.AsyncClient,
+                              address: str,
+                              max_pages: int = 5) -> list[dict]:
+    """Page through all activity for a wallet."""
+    all_trades = []
+    page_size = 100
+    for page in range(max_pages):
+        batch = await fetch_activity(
+            client, address, limit=page_size, offset=page * page_size
+        )
+        if not batch:
+            break
+        all_trades.extend(batch)
+        if len(batch) < page_size:
+            break
+    return all_trades
+
+
+# ── Trades (Data API) ─────────────────────────────────────────────────────
+# Endpoint: GET https://data-api.polymarket.com/trades
+# Params:   user, market (conditionId), limit, offset
+
+async def fetch_trades(client: httpx.AsyncClient,
+                       address: str,
+                       limit: int = 100,
+                       offset: int = 0) -> list[dict]:
+    """Fetch trades for a wallet."""
+    try:
+        data = await _get(
+            client,
+            f"{config.DATA_API}/trades",
+            params={"user": address, "limit": limit, "offset": offset},
+        )
+    except Exception:
+        data = None
+
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return data
+    return data.get("trades", data.get("results", []))
+
+
+# ── Positions (Data API) ──────────────────────────────────────────────────
+# Endpoint: GET https://data-api.polymarket.com/positions
+# Params:   user (required), market (conditionId), sizeThreshold
+
+async def fetch_positions(client: httpx.AsyncClient,
+                           address: str) -> list[dict]:
+    """Fetch current open positions for a wallet."""
+    try:
+        data = await _get(
+            client,
+            f"{config.DATA_API}/positions",
+            params={"user": address},
+        )
+        if data is None:
+            return []
+        if isinstance(data, list):
+            return data
+        return data.get("positions", data.get("results", []))
+    except Exception:
+        return []
+
+
+# ── Market Info (Gamma API) ────────────────────────────────────────────────
+# Endpoint: GET https://gamma-api.polymarket.com/markets
+# Endpoint: GET https://gamma-api.polymarket.com/markets/{conditionId}
+
+async def fetch_market(client: httpx.AsyncClient,
+                       condition_id: str) -> dict | None:
+    """Fetch single market details by condition ID."""
+    try:
+        return await _get(
+            client, f"{config.GAMMA_API}/markets/{condition_id}"
+        )
+    except Exception:
+        return None
+
+
+async def fetch_market_by_slug(client: httpx.AsyncClient,
+                                slug: str) -> dict | None:
+    """Fetch market by its URL slug."""
+    try:
+        data = await _get(
+            client, f"{config.GAMMA_API}/markets",
+            params={"slug": slug, "limit": 1},
+        )
+        if isinstance(data, list) and data:
+            return data[0]
+        return data
+    except Exception:
+        return None
+
+
+async def fetch_active_markets(client: httpx.AsyncClient,
+                                limit: int = 50) -> list[dict]:
+    """Fetch currently active / open markets."""
+    try:
+        data = await _get(
+            client, f"{config.GAMMA_API}/markets",
+            params={"active": True, "closed": False, "limit": limit,
+                    "order": "volume", "ascending": False},
+        )
+        if isinstance(data, list):
+            return data
+        return data.get("markets", data.get("results", []))
+    except Exception:
+        return []
+
+
+def get_quote(http, market_slug):
+    # Best-effort quote from CLOB book.
+    # Returns dict {bid, ask, mid, spread, source} or None if no valid quote.
+    try:
+        r = http.get(f"{CLOB_API}/markets/{market_slug}/book", timeout=10)
+        r.raise_for_status()
+        data = r.json()
+
+        bid = None
+        ask = None
+
+        # Common shapes:
+        # 1) {"bids":[{"price":"0.52","size":"..."}, ...], "asks":[...]}
+        # 2) {"bids":[["0.52","100"], ...], "asks":[["0.53","90"], ...]}
+        # 3) {"bestBid":"0.52","bestAsk":"0.53"} or {"bid":..., "ask":...}
+        bids = data.get("bids") or data.get("buy") or data.get("bidBook")
+        asks = data.get("asks") or data.get("sell") or data.get("askBook")
+
+        def _best_price(side_list, is_bid: bool):
+            if not side_list or not isinstance(side_list, list):
+                return None
+            prices = []
+            for lvl in side_list:
+                try:
+                    if isinstance(lvl, dict):
+                        p = lvl.get("price") or lvl.get("p") or lvl.get("rate")
+                    elif isinstance(lvl, (list, tuple)) and len(lvl) >= 1:
+                        p = lvl[0]
+                    else:
+                        continue
+                    if p is None:
+                        continue
+                    prices.append(float(p))
+                except Exception:
+                    continue
+            if not prices:
+                return None
+            return max(prices) if is_bid else min(prices)
+
+        bid = _best_price(bids, True)
+        ask = _best_price(asks, False)
+
+        if bid is None:
+            raw = data.get("bid") or data.get("bestBid") or data.get("best_bid")
+            if raw is not None:
+                bid = float(raw)
+
+        if ask is None:
+            raw = data.get("ask") or data.get("bestAsk") or data.get("best_ask")
+            if raw is not None:
+                ask = float(raw)
+
+        # Validate
+        if bid is None or ask is None:
+            return None
+        bid = float(bid)
+        ask = float(ask)
+        if bid <= 0 or ask <= 0 or ask < bid:
+            return None
+
+        mid = (bid + ask) / 2.0
+        spread = ask - bid
+        return {"bid": bid, "ask": ask, "mid": mid, "spread": spread, "source": "clob_book"}
+    except Exception:
+        return None
+

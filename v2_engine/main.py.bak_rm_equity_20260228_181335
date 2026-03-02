@@ -1,0 +1,137 @@
+START_BANKROLL = 1000.0
+
+import sqlite3
+import time
+from edge_engine import edge_is_valid
+from risk_engine import approve_trade
+from execution_simulator import insert_paper_trade
+
+# --- DB PATH FIX (autopatched) ---
+from pathlib import Path as _Path
+_ROOT = _Path(__file__).resolve().parents[1]
+_DB_PATH = str(_ROOT / "poly_alpha.db")
+
+def _connect_db():
+    import sqlite3
+    conn = sqlite3.connect(_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
+# --- END DB PATH FIX ---
+
+DB = "../poly_alpha.db"
+
+def get_total_exposure(conn):
+    row = conn.execute("""
+        SELECT COALESCE(SUM(size_usd), 0)
+        FROM paper_positions
+        WHERE status='open'
+    """).fetchone()
+    return row[0] if row else 0
+
+def fetch_recent_signals(conn):
+    return conn.execute("""
+        SELECT t.wallet_address,
+               t.market_slug,
+               t.outcome,
+               t.side,
+               t.price,
+               w.alpha_score
+        FROM trades t
+        JOIN wallets w
+        ON t.wallet_address = w.address
+        WHERE t.timestamp > strftime('%s','now') - 300
+    """).fetchall()
+
+
+def get_bankroll(conn):
+    row = conn.execute("SELECT bankroll FROM paper_ledger ORDER BY id DESC LIMIT 1").fetchone()
+    return float(row["bankroll"]) if row else float(START_BANKROLL)
+
+
+def get_drawdown(conn, bankroll):
+    row = conn.execute("SELECT MAX(bankroll) AS peak FROM paper_ledger").fetchone()
+    peak = float(row["peak"]) if row and row["peak"] is not None else float(bankroll)
+    if peak <= 0:
+        return 0.0
+    return max(0.0, (peak - float(bankroll)) / peak)
+
+
+START_BANKROLL = 1000.0
+
+def get_bankroll(conn):
+    row = conn.execute(
+        "SELECT bankroll FROM paper_ledger ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return float(row["bankroll"]) if row else START_BANKROLL
+
+def get_drawdown(conn, bankroll):
+    row = conn.execute(
+        "SELECT MAX(bankroll) AS peak FROM paper_ledger"
+    ).fetchone()
+    peak = float(row["peak"]) if row and row["peak"] else bankroll
+    if peak <= 0:
+        return 0.0
+    return max(0.0, (peak - bankroll) / peak)
+
+def main():
+    conn = _connect_db()
+    conn = _connect_db()
+    _db_preflight(conn)
+
+    bankroll = get_bankroll(conn)
+    drawdown = get_drawdown(conn, bankroll)
+
+    print(f"[STATE] bankroll={bankroll:.2f} dd={drawdown*100:.2f}%")
+
+    if drawdown >= 0.20:
+    	print(f"[FREEZE] HARD_DRAWDOWN hit: {drawdown*100:.2f}%")
+    	return
+
+    bankroll = get_bankroll(conn)
+    total_exposure = get_total_exposure(conn)
+    equity_history = get_equity_history(conn)
+    drawdown = get_drawdown(conn, bankroll)
+    if drawdown >= 0.20:
+        print(f"[FREEZE] HARD_DRAWDOWN hit: {drawdown*100:.2f}%")
+        return
+    
+    signals = fetch_recent_signals(conn)
+
+    for wallet, slug, outcome, side, price, score in signals:
+
+        valid, edge = edge_is_valid(score, price)
+        if not valid:
+            continue
+
+        proposed_size = bankroll * 0.01
+
+        approved, result = approve_trade(
+            bankroll,
+            proposed_size,
+            drawdown,
+            total_exposure,
+            theme_exposure=0
+        )
+
+        if approved:
+            insert_paper_trade(
+                conn, wallet, slug, outcome,
+                side, price, result
+            )
+
+def _db_preflight(conn):
+    import os
+    required = {"paper_ledger","paper_positions","wallets","trades"}
+    print("[PRE] cwd:", os.getcwd())
+    print("[PRE] db:", conn.execute("PRAGMA database_list").fetchall())
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    print("[PRE] tables:", sorted(tables))
+    missing = required - tables
+    if missing:
+        raise SystemExit("[FATAL] wrong DB opened; missing: " + ", ".join(sorted(missing)))
+    print("[PRE] DB OK")
+
+if __name__ == "__main__":
+    main()
+
+print(f"[RUN COMPLETE]")
