@@ -435,10 +435,15 @@ class PaperTrader:
 
         side = str(pos.get("side", "")).upper()
         if side in ("BUY", "YES", "LONG"):
-            pnl = size * (exit_price - entry) / entry if entry else 0.0
+            qty = (size / entry) if entry else 0.0
+            pnl = (qty * exit_price) - size
         else:
-            pnl = size * (entry - exit_price) / (1 - entry) if entry < 1 else 0.0
+            qty = (size / entry) if entry else 0.0
+            pnl = size - (qty * exit_price)
 
+        cap = max(size * 1.0, 1.0)
+        if pnl > cap: pnl = cap
+        if pnl < -cap: pnl = -cap
         pnl = round(float(pnl), 2)
 
         with db.transaction(self.conn):
