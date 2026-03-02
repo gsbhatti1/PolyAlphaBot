@@ -19,7 +19,7 @@ FORCE_MAX_PER_HOUR = 10
 
 # ── Execution Mode (Paper ≈ Live) ──────────────────────────────────────────
 EXECUTION_MODE = "PAPER"          # PAPER / SHADOW / LIVE
-LIVE_CAPITAL_FRACTION = 0.01      # 1% when LIVE
+LIVE_CAPITAL_FRACTION = 1.0      # 1% when LIVE
 
 # Market-order realism (paper sim)
 SIM_LATENCY_MS_MIN = 250
@@ -64,7 +64,7 @@ MAX_OPEN_EXPOSURE_USD = 100             # max $100 locked total
 MAX_MARKET_EXPOSURE_USD = 150     # per (market,outcome,side)
 MAX_MARKET_POSITIONS = 5
 COOLDOWN_SECONDS_PER_MARKET = 10   # faster recycle (was 20)
-WALLET_COOLDOWN_SEC = 180             # 3 min cooldown
+WALLET_COOLDOWN_SEC = 120             # 2 min cooldown
 
 # ── Alerts ─────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
