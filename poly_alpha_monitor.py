@@ -256,7 +256,7 @@ async def telegram_command_loop(conn, paper):
 
                     text = (msg.get("text") or "").strip().lower()
                     if text in ("/status", "/report"):
-                        alerts.send_telegram_sync(dbtruth.dbtruth.build_portfolio_snapshot_dbtruth(conn))
+                        alerts.send_telegram_sync(dbtruth.build_portfolio_snapshot_dbtruth(conn))
                     elif text == "/positions":
                         rows = conn.execute(
                             """
