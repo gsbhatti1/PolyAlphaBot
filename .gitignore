@@ -1,29 +1,23 @@
+# Database
+*.db
+*.db-shm
+*.db-wal
+*.db.bak*
+
+# Backup files
+*.bak
+*.bak.*
+*.save
+*.dump
+
+# Secrets
+config_secrets.py
+.env
+
 # Python
 __pycache__/
 *.pyc
 *.pyo
-*.pyd
-
-# Virtualenv
-venv/
-
-# Databases
-*.db
-*.db.bak*
-*.db.backup*
 
 # Logs
-logs/
 *.log
-monitor.log
-monitor_err.log
-poly_alpha_aggressive.log
-
-# Secrets (we'll add later)
-config_secrets.py
-
-# Backups
-*.bak.*
-*.bak_*
-backups/
-paper_trader.py.autopatch_live_*.bak

@@ -128,6 +128,26 @@ async def send_discord(msg: str):
     except Exception as e:
         logger.warning(f"Discord send failed: {e}")
 
+# ── Telegram getUpdates (command polling) ─────────────────────────────────
+def get_telegram_updates_sync(offset: int = 0, timeout_sec: int = 15) -> dict:
+    """
+    Poll Telegram Bot API for new updates (used by command loop).
+    Returns the raw JSON response dict, or {} on error.
+    """
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    if not token:
+        return {}
+    try:
+        import httpx
+        url = f"https://api.telegram.org/bot{token}/getUpdates"
+        r = httpx.get(url, params={"offset": offset, "timeout": timeout_sec}, timeout=timeout_sec + 5)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return {}
+
+
 # ── Legacy sync wrapper (monitor calls this) ──────────────────────────────
 def send_telegram_sync(msg: str):
     """Direct wrapper — monitor uses this for all alerts."""

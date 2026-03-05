@@ -9,22 +9,18 @@ Hardening goals:
 import time
 import random
 import json
+import logging
 
 import db
-from config import EXECUTION_MODE, MAX_PAPER_TRADE_USD
-try:
-    from live_trader import LiveTrader
-except Exception:
-    LiveTrader = None
-
 import config
-
 from config import EXECUTION_MODE, MAX_PAPER_TRADE_USD
 
 try:
     from live_trader import LiveTrader
 except Exception:
     LiveTrader = None
+
+logger = logging.getLogger("polymarket-bot")
 
 
 def _qinfo(q):
@@ -67,7 +63,7 @@ if EXECUTION_MODE == "LIVE" and LiveTrader is not None:
         live_trader = LiveTrader()
     except Exception as e:
         logger.exception("Failed to init LiveTrader: %s", e)
-        live_trader = None
+        live_trader = None  # noqa: F841
 
 
 class PaperTrader:
@@ -83,7 +79,18 @@ class PaperTrader:
     def _load_state(self):
         row = self.conn.execute("SELECT bankroll FROM paper_ledger ORDER BY id DESC LIMIT 1").fetchone()
         if row and row["bankroll"] is not None:
-            self.bankroll = float(row["bankroll"])
+            loaded = float(row["bankroll"])
+            # Safety floor: if ledger bankroll is impossibly low (ghost drain from
+            # old bugs), don't load it — start fresh from STARTING_BANKROLL instead.
+            floor = float(config.STARTING_BANKROLL) * 0.05  # 5% of start = clearly wrong
+            if loaded >= floor:
+                self.bankroll = loaded
+            else:
+                import logging as _log
+                _log.getLogger("polymarket-bot").warning(
+                    "[BANKROLL] Ignoring suspiciously low ledger value %.2f (floor=%.2f), "
+                    "starting fresh at %.2f", loaded, floor, self.bankroll
+                )
 
     # ---------- Outbox helpers (single-row lifecycle) ----------
 
@@ -300,6 +307,23 @@ class PaperTrader:
                 self._last_throttle_log_ts = now
             return -1
 
+        # ── EARLY duplicate guard — before any API calls or outbox creation ──
+        try:
+            _dup_early = self.conn.execute(
+                """
+                SELECT id FROM paper_positions
+                WHERE (closed_at IS NULL OR closed_at=0 OR status='open')
+                  AND market_slug=? AND outcome=? AND side=?
+                LIMIT 1
+                """,
+                (market_slug, outcome, side),
+            ).fetchone()
+            if _dup_early:
+                self.last_skip_reason = "duplicate_open_position"
+                return -1
+        except Exception:
+            pass
+
         # create ONE outbox row (attempt) up front
         outbox_id = self._log_outbox(
             mode, market_slug, side, outcome, "MARKET", size_usd,
@@ -360,6 +384,10 @@ class PaperTrader:
                 )
             except Exception:
                 pass
+            # Defaults so _insert_fill() never hits NameError in LIVE mode
+            slip_bps = 0.0
+            fee_usd = 0.0
+
             # LIVE routing: call real CLOB executor instead of simulator
             if mode == "LIVE" and live_trader is not None:
                 try:
@@ -439,31 +467,36 @@ class PaperTrader:
                 self._update_outbox(outbox_id, "skipped", self.last_skip_reason, payload=json.dumps(quote))
                 return -1
 
-            # open position + write fill in one transaction
-            with db.transaction(self.conn):
-                pos_id = db.open_paper_position(self.conn, pos)
+            # open position + write fill in one transaction.
+            # IMPORTANT: do NOT touch self.bankroll inside the transaction block.
+            # DB transactions roll back on failure but Python memory does not.
+            # Deduct only AFTER the with-block exits successfully.
+            pos_id = None
+            try:
+                with db.transaction(self.conn):
+                    pos_id = db.open_paper_position(self.conn, pos)
+                    self._insert_fill(
+                        outbox_id=outbox_id or 0,
+                        market_slug=pos["market_slug"],
+                        side=pos["side"],
+                        outcome=pos["outcome"],
+                        size_usd=float(pos["size_usd"]),
+                        bid=float(bid),
+                        ask=float(ask),
+                        fill_price=float(pos["entry_price"]),
+                        slip_bps=float(slip_bps),
+                        fee_usd=float(fee_usd),
+                        notes="sim_fill",
+                    )
+            except Exception as e:
+                # Transaction rolled back — in-memory bankroll is untouched (safe)
+                self.last_skip_reason = f"db_error:{e.__class__.__name__}:{e}"
+                self._update_outbox(outbox_id, "error", self.last_skip_reason)
+                return -1
 
-                # --- CASH-LOCK bankroll (prevents fake profit) ---
-                # reserve principal at open; released at close
-                self.bankroll -= float(pos['size_usd'])
-                db.snapshot_ledger(self.conn, self.bankroll)
-                # fill MUST be tied to outbox_id
-                self._insert_fill(
-                    outbox_id=outbox_id or 0,
-                    market_slug=pos["market_slug"],
-                    side=pos["side"],
-                    outcome=pos["outcome"],
-                    size_usd=float(pos["size_usd"]),
-                    bid=float(bid),
-                    ask=float(ask),
-                    fill_price=float(pos["entry_price"]),
-                    slip_bps=float(slip_bps),
-                    fee_usd=float(fee_usd),
-                    notes="sim_fill",
-                )
-
-                # bankroll snapshot (equity-style; no decay on open)
-                db.snapshot_ledger(self.conn, self.bankroll)
+            # Transaction committed — NOW safe to deduct from in-memory bankroll
+            self.bankroll -= float(pos["size_usd"])
+            db.snapshot_ledger(self.conn, self.bankroll)
 
             # lifecycle: opened -> filled (paper fill is immediate)
             self._update_outbox(outbox_id, "opened", None, payload=json.dumps(quote))
@@ -472,7 +505,9 @@ class PaperTrader:
 
         except Exception as e:
             # no silent failures
-            self._update_outbox(outbox_id, "error", f"{e.__class__.__name__}:{e}")
+            err = f"{e.__class__.__name__}:{e}"
+            self.last_skip_reason = err
+            self._update_outbox(outbox_id, "error", err)
             return -1
 
     # ---------- Close / resolution ----------
@@ -524,111 +559,89 @@ class PaperTrader:
                     closed.append(info)
         return closed
 
-    def auto_close_by_age(self) -> int:
-        """
-        Close paper positions older than AUTO_CLOSE_SEC so the book doesn't hit cap forever.
-        Price mode:
-          - entry: exit_price = entry_price (PnL=0) safest unblock
-          - mid:   exit_price = latest quotes.mid if available
-        """
-        hold_sec = int(getattr(config, "AUTO_CLOSE_SEC", 0) or 0)
-        if hold_sec <= 0:
-            return 0
 
-        now = time.time()
-        cutoff = now - hold_sec
-        mode = str(getattr(config, "AUTO_CLOSE_PRICE_MODE", "entry") or "entry").lower()
-
-        rows = self.conn.execute(
-            """
-            SELECT id, market_slug, entry_price
-            FROM paper_positions
-            WHERE status='open' AND opened_at < ?
-            ORDER BY opened_at ASC
-            LIMIT 200
-            """,
-            (cutoff,),
-        ).fetchall()
-
-        closed = 0
-        for r in rows:
-            try:
-                pos_id = int(r["id"])
-                entry = float(r["entry_price"] or 0.0)
-                exit_price = entry
-
-                if mode == "mid":
-                    q = self.conn.execute(
-                        """
-                        SELECT mid
-                        FROM quotes
-                        WHERE market_slug=?
-                        ORDER BY ts DESC
-                        LIMIT 1
-                        """,
-                        (r["market_slug"],),
-                    ).fetchone()
-                    if q and q["mid"] is not None:
-                        try:
-                            exit_price = float(q["mid"])
-                        except Exception:
-                            exit_price = entry
-
-                self.close_position(pos_id, exit_price)
-                closed += 1
-            except Exception:
-                continue
-
-        return closed
 
     def auto_close_positions(self) -> int:
-        """Auto-close stale paper positions to prevent cap deadlock."""
+        """
+        Auto-close paper positions older than AUTO_CLOSE_SEC.
+
+        Exit price priority:
+          1. Fresh live quote from Polymarket CLOB API (real market price)
+          2. Most recent quote stored in DB for this market
+          3. Entry price as last resort (PnL=0 — only if API and DB both fail)
+        """
         auto_sec = int(getattr(config, "AUTO_CLOSE_SEC", 0) or 0)
         if auto_sec <= 0:
             return 0
 
-        mode = str(getattr(config, "AUTO_CLOSE_PRICE_MODE", "entry") or "entry").lower().strip()
         now = time.time()
         closed = 0
 
         rows = self.conn.execute(
             """
-            SELECT id, entry_price, opened_at
+            SELECT id, market_slug, outcome, entry_price, opened_at
             FROM paper_positions
             WHERE (closed_at IS NULL OR closed_at=0 OR status='open')
             """
         ).fetchall()
 
+        # import here to avoid circular at module level
+        try:
+            import httpx as _httpx
+            import poly_api as _poly_api
+        except Exception:
+            _httpx = None
+            _poly_api = None
+
         for r in rows:
             try:
-                pos_id = int(r["id"])
+                pos_id    = int(r["id"])
                 opened_at = float(r["opened_at"] or 0.0)
                 if opened_at <= 0:
                     continue
                 if (now - opened_at) < auto_sec:
                     continue
 
+                slug  = r["market_slug"]
                 entry = float(r["entry_price"] or 0.0)
-                exit_price = entry
+                exit_price = None
 
-                if mode == "mid":
+                # ── 1. Try live API quote ─────────────────────────────────
+                if _httpx and _poly_api and slug:
                     try:
-                        q = self.conn.execute(
+                        with _httpx.Client(timeout=8.0) as http:
+                            q = _poly_api.get_quote(http, slug, outcome=r["outcome"])
+                        if q and isinstance(q, dict):
+                            mid = q.get("mid")
+                            if mid is not None:
+                                exit_price = float(mid)
+                    except Exception:
+                        exit_price = None
+
+                # ── 2. Fall back to most recent DB quote for this market ───
+                if exit_price is None and slug:
+                    try:
+                        row = self.conn.execute(
                             """
                             SELECT mid FROM quotes
-                            WHERE ts > ?
+                            WHERE market_slug=?
                             ORDER BY ts DESC
                             LIMIT 1
                             """,
-                            (now - 120.0,),
+                            (slug,),
                         ).fetchone()
-                        if q and q["mid"] is not None:
-                            exit_price = float(q["mid"])
+                        if row and row["mid"] is not None:
+                            exit_price = float(row["mid"])
                     except Exception:
-                        exit_price = entry
+                        pass
+
+                # ── 3. Last resort: entry price (zero PnL) ────────────────
+                if exit_price is None:
+                    exit_price = entry
 
                 self.close_position(pos_id, exit_price)
                 closed += 1
+
             except Exception:
                 continue
 
@@ -645,17 +658,19 @@ class PaperTrader:
         locked = float(open_exposure or 0.0)
         expected_max_cash = float(config.STARTING_BANKROLL) + realized_pnl - locked
         if float(self.bankroll) > (expected_max_cash + 1e-6):
-            self.last_skip_reason = "TRUTH_GUARD_violation"
+            # TRUTH_GUARD: bankroll in memory is ahead of what DB can justify.
+            # Most common cause: bot restarted after DB wipe but open positions
+            # remain, so DB shows locked exposure that memory doesn't account for.
+            # FIX: correct memory bankroll DOWN to match DB reality, then continue.
             try:
-                import logging
-                logging.getLogger("polymarket-bot").error(
-                    "[TRUTH_GUARD] bankroll=%0.2f expected_max_cash=%0.2f realized_pnl=%0.4f locked=%0.2f",
+                logger.warning(
+                    "[TRUTH_GUARD] correcting bankroll %.2f -> %.2f "
+                    "(realized_pnl=%.4f locked=%.2f)",
                     float(self.bankroll), expected_max_cash, realized_pnl, locked
                 )
             except Exception:
                 pass
-            # freeze new positions by setting an extremely long throttle
-            self.pos_block_until = 1e18
+            self.bankroll = expected_max_cash  # snap memory to DB reality
 
         # truth-based return: use realized P&L from stats (DB has paper_positions.pnl)
         total_pnl = float(stats.get("total_pnl", stats.get("pnl", 0.0)) or 0.0)

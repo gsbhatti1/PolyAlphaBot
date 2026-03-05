@@ -175,22 +175,36 @@ def build_portfolio_report(conn, paper) -> str:
     """Visual Telegram portfolio snapshot (Markdown)."""
     s = paper.get_summary()
 
-    bankroll = float(s.get("bankroll", 0))
-    pnl = float(s.get("total_pnl", 0))
-    exposure = float(s.get("total_exposure", 0))
-    open_positions = int(s.get("open_positions", 0))
+    bankroll      = float(s.get("bankroll", 0))
+    starting      = float(s.get("starting_bankroll", 1000))
+    pnl           = float(s.get("total_pnl", 0))
+    exposure      = float(s.get("open_exposure", 0))   # correct key
+    open_pos      = int(s.get("open_positions", 0))
+    total_trades  = int(s.get("total_trades", 0))
+    wins          = int(s.get("wins", 0))
+    losses        = int(s.get("losses", 0))
+    win_rate      = float(s.get("win_rate", 0)) * 100
+    total_return  = round(((bankroll + exposure - starting) / starting) * 100, 2)
 
-    emoji = "🟢" if pnl >= 0 else "🔴"
+    pnl_emoji  = "🟢" if pnl >= 0 else "🔴"
+    ret_emoji  = "📈" if total_return >= 0 else "📉"
 
-    lines = []
-    lines.append("📊 *Poly Alpha Portfolio Snapshot*")
-    lines.append("")
-    lines.append(f"💰 Bankroll: *${bankroll:,.2f}*")
-    lines.append(f"{emoji} PnL: *${pnl:,.2f}*")
-    lines.append(f"📦 Open Positions: *{open_positions}*")
-    lines.append(f"⚖️ Exposure: *${exposure:,.2f}*")
-    lines.append("")
-    lines.append("_Controlled. Adaptive. Institutional._")
+    lines = [
+        "📊 *Poly Alpha — Portfolio Report*",
+        "",
+        f"💰 Bankroll:     *${bankroll:,.2f}*  (started ${starting:,.0f})",
+        f"{ret_emoji} Total Return:  *{total_return:+.2f}%*",
+        f"{pnl_emoji} Realised PnL:  *${pnl:+,.2f}*",
+        "",
+        f"📦 Open Positions: *{open_pos}*  (${exposure:,.2f} locked)",
+        "",
+        f"📋 Trade Record:",
+        f"   Closed:    {total_trades}",
+        f"   Wins:      {wins}  |  Losses: {losses}",
+        f"   Win Rate:  {win_rate:.1f}%",
+        "",
+        "_Poly Alpha · Paper Mode_",
+    ]
 
     return "\n".join(lines)
 
@@ -204,8 +218,6 @@ def should_send_report(prev: dict | None, cur: dict) -> bool:
     if abs(cur["open_exposure"] - prev["open_exposure"]) >= float(getattr(config, "REPORT_DELTA_EXPOSURE", 50)):
         return True
     if cur["open_positions"] != prev["open_positions"] and abs(cur["open_positions"] - prev["open_positions"]) >= int(getattr(config, "REPORT_DELTA_OPEN_POS", 1)):
-        return True
-    if cur["total_trades"] != prev["total_trades"] or cur["wins"] != prev["wins"] or cur["losses"] != prev["losses"]:
         return True
     return False
 
@@ -497,11 +509,12 @@ async def poll_wallet(
                     pos_id = paper.open_position(wallet, trade_record, sizing)
                     if pos_id and int(pos_id) > 0:
                         LAST_PAPER_TS[addr] = now
+                        DECISION_COUNTS['opened'] += 1
+                        paper_size = sizing["size_usd"]
+                        trade_record["paper_size"] = paper_size
                     else:
                         reason = getattr(paper, 'last_skip_reason', None) or 'unknown_skip'
                         logger.info('[PAPER_DEBUG] open_position skipped reason=%s', reason)
-                paper_size = sizing["size_usd"]
-                trade_record["paper_size"] = paper_size
             else:
                 DECISION_COUNTS['kelly_skip'] += 1
                 logger.info("[PAPER_DEBUG] sizing None -> skip (kelly/floor)")
@@ -518,13 +531,17 @@ async def poll_wallet(
                 "bankroll": float(getattr(paper, "bankroll", 0.0)),
             }
 
-        msg = alerts.format_new_trade_alert(wallet, trade_record, paper_action)
+        # Only alert on actual opens (not every detection) and only if configured
+        _notify_exec = getattr(config, 'TELEGRAM_NOTIFY_EXECUTIONS', True)
+        _notify_detect = getattr(config, 'TELEGRAM_NOTIFY_DETECTIONS', False)
+        _should_alert = (_notify_exec and paper_action and paper_action.get('status') == 'OPENED') or                         (_notify_detect and (not paper_action or paper_action.get('status') != 'OPENED'))
 
-        # Send Telegram alert for the new trade
-        try:
-            alerts.send_telegram_sync(msg) if can_send_alert() else logger.info('telegram alert suppressed')
-        except Exception as e:
-            logger.warning(f"[telegram] send trade alert failed: {e!r}")
+        if _should_alert:
+            msg = alerts.format_new_trade_alert(wallet, trade_record, paper_action)
+            try:
+                alerts.send_telegram_sync(msg) if can_send_alert() else logger.info('telegram alert suppressed')
+            except Exception as e:
+                logger.warning(f"[telegram] send trade alert failed: {e!r}")
 
 
 

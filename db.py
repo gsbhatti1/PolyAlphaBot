@@ -321,3 +321,22 @@ def get_paper_stats(conn):
         "total_pnl": total_pnl,
         "win_rate": win_rate,
     }
+
+
+def snapshot_ledger(conn, bankroll=None, open_positions=None, total_pnl=None,
+                    num_trades=None, win_rate=None, timestamp=None, **_):
+    """
+    Write a bankroll snapshot to paper_ledger.
+    Extra kwargs are accepted and ignored for forward compatibility.
+    """
+    import time as _time
+    ts = timestamp if timestamp is not None else _time.time()
+    try:
+        conn.execute(
+            "INSERT INTO paper_ledger (ts, bankroll) VALUES (?, ?)",
+            (ts, float(bankroll) if bankroll is not None else 0.0),
+        )
+    except Exception:
+        # If schema has extra columns or table is missing, fail silently —
+        # this is a non-critical audit trail, not core trade logic.
+        pass

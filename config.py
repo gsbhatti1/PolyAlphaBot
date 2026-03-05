@@ -19,7 +19,7 @@ FORCE_MAX_PER_HOUR = 10
 
 # ── Execution Mode (Paper ≈ Live) ──────────────────────────────────────────
 EXECUTION_MODE = "PAPER"          # PAPER / SHADOW / LIVE
-LIVE_CAPITAL_FRACTION = 1.0      # 1% when LIVE
+LIVE_CAPITAL_FRACTION = 0.01     # 1% of computed size deployed when LIVE (safety ramp)
 
 # Market-order realism (paper sim)
 SIM_LATENCY_MS_MIN = 250
@@ -98,15 +98,11 @@ TELEGRAM_PORTFOLIO_LAST_N = 5
 
 TELEGRAM_CMD_POLL_SEC = 5
 
-REPORT_DELTA_BANKROLL = 25
-
-REPORT_DELTA_PNL = 10
-
-REPORT_DELTA_OPEN_POS = 1
-
-REPORT_DELTA_EXPOSURE = 50
-
-REPORT_THROTTLE_SEC = 30
+REPORT_DELTA_BANKROLL = 50       # only report when bankroll moves $50+
+REPORT_DELTA_PNL = 20            # only report when PnL moves $20+
+REPORT_DELTA_OPEN_POS = 3        # only report when 3+ positions open/close (not every single one)
+REPORT_DELTA_EXPOSURE = 100      # only report when exposure moves $100+
+REPORT_THROTTLE_SEC = 300        # max one portfolio report per 5 minutes
 
 IGNORE_OLD_TRADES_ON_BOOT_SEC = 86400  # ignore trades older than 24h on boot
 
@@ -115,7 +111,8 @@ MAX_TELEGRAM_ALERTS_PER_MIN = 12
 ALERTS_SUPPRESS_SUMMARY = True
 
 # --- Paper position auto-close (prevents cap deadlock) ---
-AUTO_CLOSE_SEC = 60              # 15 minutes
-AUTO_CLOSE_PRICE_MODE = "mid"
+AUTO_CLOSE_SEC = 900             # 15 min hold before auto-close
+AUTO_CLOSE_PRICE_MODE = "mid"    # exit at real live market price per position
+                                 # safe: auto_close now fetches fresh API quote per market_slug
 TELEGRAM_NOTIFY_DETECTIONS = False
 TELEGRAM_NOTIFY_EXECUTIONS = True
