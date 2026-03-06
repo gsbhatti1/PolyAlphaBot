@@ -79,7 +79,31 @@ MIN_WALLET_TRADES     = 30      # lower threshold — catch more human traders
 MIN_WALLET_DAYS       = 90      # ignore wallets active less than 90 days
 
 # ── Market volume filter ──────────────────────────────────────────────────
-MIN_MARKET_VOLUME_USD = 50_000  # skip markets with less than $50k total volume
+MIN_MARKET_VOLUME_USD = 50_000
+
+# ── Anomaly / Insider scoring ──────────────────────────────────────────
+# Composite score 0-10 based on wallet age, bet size, market concentration
+ANOMALY_SUPER_INSIDER   = 7.0   # bypass ALL filters, max size × 3
+ANOMALY_INSIDER         = 5.0   # bypass consensus + volume filter
+ANOMALY_SUSPICIOUS      = 3.0   # bypass consensus only
+
+# ── Signal freshness ───────────────────────────────────────────────────
+# If a consensus signal is older than these thresholds, scale down size
+SIGNAL_MAX_AGE_MIN      = 120   # skip signals older than 2 hours
+SIGNAL_DRIFT_SKIP       = 0.25  # skip if price drifted >25% since whale entry
+SIGNAL_DRIFT_REDUCE     = 0.10  # reduce if price drifted >10%
+
+# ── Anomaly / Insider scoring ──────────────────────────────────────────
+# Composite score 0-10 based on wallet age, bet size, market concentration
+ANOMALY_SUPER_INSIDER   = 7.0   # bypass ALL filters, max size × 3
+ANOMALY_INSIDER         = 5.0   # bypass consensus + volume filter
+ANOMALY_SUSPICIOUS      = 3.0   # bypass consensus only
+
+# ── Signal freshness ───────────────────────────────────────────────────
+# If a consensus signal is older than these thresholds, scale down size
+SIGNAL_MAX_AGE_MIN      = 120   # skip signals older than 2 hours
+SIGNAL_DRIFT_SKIP       = 0.25  # skip if price drifted >25% since whale entry
+SIGNAL_DRIFT_REDUCE     = 0.10  # reduce if price drifted >10%  # skip markets with less than $50k total volume
                                  # prevents slippage in illiquid markets
 
 # ── Kelly sizing ──────────────────────────────────────────────────────────

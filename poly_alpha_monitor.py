@@ -657,20 +657,27 @@ async def poll_wallet(
                     # Wallet betting 3x+ their average = high conviction
                     # Copy at full Kelly. Normal size = half Kelly.
                     if avg_bet > 100 and trade_size >= avg_bet * 3:
-                        conviction = "high"
+                        # Scale conviction multiplier based on anomaly score tier
+                        if is_super_insider:
+                            _conv_mult = 3.0   # SUPER_INSIDER: 3x sizing
+                        elif is_insider_signal:
+                            _conv_mult = 2.0   # INSIDER: 2x sizing
+                        else:
+                            _conv_mult = 1.5   # High conviction normal wallet
                         sizing["size_usd"] = min(
-                            sizing["size_usd"] * 2.0,
+                            sizing["size_usd"] * _conv_mult,
                             float(getattr(config, "MAX_PAPER_TRADE_USD", 50)) * 3
                         )
-                        logger.info("[CONVICTION] high conviction trade %.0fx avg -> size $%.0f",
-                                    trade_size/avg_bet, sizing["size_usd"])
+                        logger.info("[CONVICTION] score=%.1f mult=%.1fx trade=%.0fx_avg size=$%.0f",
+                                    anomaly_score, _conv_mult, trade_size/avg_bet, sizing["size_usd"])
                     else:
-                        conviction = "normal"
+                        pass  # normal sizing from Kelly
 
                     # ── Consensus filter: only trade when 2+ wallets agree ──
-                    # EXCEPTION: insider signals bypass consensus — act immediately
+                    # EXCEPTION: anomaly >=3 (SUSPICIOUS+) bypasses consensus
+                    # rationale: fresh wallets with large bets don't wait for confirmation
                     min_consensus = int(getattr(config, 'MIN_CONSENSUS_WALLETS', 1))
-                    if min_consensus > 1 and not is_insider_signal:
+                    if min_consensus > 1 and anomaly_score < 3.0:
                         slug_check  = trade_record.get("market_slug", "")
                         out_check   = trade_record.get("outcome", "")
                         side_check  = trade_record.get("side", "")
@@ -691,6 +698,176 @@ async def poll_wallet(
                             logger.info('[PAPER_DEBUG] consensus skip %s: only %d/%d wallets',
                                         slug_check, consensus_count + 1, min_consensus)
                             continue
+
+                    # ── Signal freshness / entry timing ──────────────────────────
+                    # Research: "if price moved >10% since whale entry, edge is gone"
+                    # Only applies to non-insider consensus trades (insiders are time-sensitive)
+                    _whale_entry = float(trade_record.get("price", 0) or 0)
+                    _signal_age_min = 0
+                    _ckey_fr = (
+                        str(trade_record.get("market_slug", "")) + "|"
+                        + str(trade_record.get("outcome", "")) + "|"
+                        + str(trade_record.get("side", ""))
+                    )
+                    if _ckey_fr in CONSENSUS_TRACKER:
+                        _signal_age_min = (time.time() - CONSENSUS_TRACKER[_ckey_fr].get("ts", time.time())) / 60
+                        # Store first_price when signal first arrived
+                        if "first_price" not in CONSENSUS_TRACKER[_ckey_fr]:
+                            CONSENSUS_TRACKER[_ckey_fr]["first_price"] = _whale_entry
+
+                    if _signal_age_min > 0 and _whale_entry > 0 and anomaly_score < 5.0:
+                        _first_price = CONSENSUS_TRACKER.get(_ckey_fr, {}).get("first_price", _whale_entry)
+                        _price_drift = (_whale_entry - _first_price) / _first_price if _first_price > 0 else 0
+
+                        # Age penalty
+                        _age_factor = 1.0
+                        if _signal_age_min > 120:
+                            _age_factor = 0.0    # >2 hours = skip
+                        elif _signal_age_min > 60:
+                            _age_factor = 0.5
+                        elif _signal_age_min > 30:
+                            _age_factor = 0.75
+
+                        # Drift penalty
+                        _drift_factor = 1.0
+                        if _price_drift > 0.25:
+                            _drift_factor = 0.0
+                        elif _price_drift > 0.15:
+                            _drift_factor = 0.4
+                        elif _price_drift > 0.10:
+                            _drift_factor = 0.7
+
+                        _freshness = round(_age_factor * _drift_factor, 3)
+                        if _freshness < 0.3:
+                            logger.info(
+                                "[STALE_SIGNAL] age=%.0fmin drift=%.1f%% freshness=%.2f → skip %s",
+                                _signal_age_min, _price_drift * 100, _freshness,
+                                trade_record.get("market_slug", "")
+                            )
+                            DECISION_COUNTS["cooldown_skip"] += 1
+                            continue
+                        elif _freshness < 1.0:
+                            sizing["size_usd"] = round(sizing["size_usd"] * _freshness, 2)
+                            logger.info(
+                                "[FRESHNESS] age=%.0fmin freshness=%.2f → scaling size to $%.0f",
+                                _signal_age_min, _freshness, sizing["size_usd"]
+                            )
+
+                    # ── Wallet decay detection ─────────────────────────────────────
+                    # If wallet lifetime win rate > 60% but recent 20 trades < 45%
+                    # they've lost their edge — skip or reduce
+                    _lifetime_wr = float(wallet.get("win_rate", 0) or 0)
+                    _recent_wr   = float(wallet.get("recent_win_rate", _lifetime_wr) or _lifetime_wr)
+                    _recent_n    = int(wallet.get("recent_trades_n", 0) or 0)
+                    if _recent_n >= 10:
+                        if _lifetime_wr > 0.60 and _recent_wr < 0.45:
+                            logger.info(
+                                "[DECAY] wallet lifetime=%.0f%% recent=%.0f%% n=%d → SKIP (lost edge)",
+                                _lifetime_wr * 100, _recent_wr * 100, _recent_n
+                            )
+                            DECISION_COUNTS["cooldown_skip"] += 1
+                            continue
+                        elif _lifetime_wr > 0.55 and _recent_wr < 0.48:
+                            _decay_mult = 0.5
+                            sizing["size_usd"] = round(sizing["size_usd"] * _decay_mult, 2)
+                            logger.info(
+                                "[DECAY] moderate decay lifetime=%.0f%% recent=%.0f%% → size halved $%.0f",
+                                _lifetime_wr * 100, _recent_wr * 100, sizing["size_usd"]
+                            )
+                        elif _recent_wr > _lifetime_wr + 0.10 and _recent_n >= 15:
+                            sizing["size_usd"] = min(
+                                round(sizing["size_usd"] * 1.3, 2),
+                                float(getattr(config, "MAX_PAPER_TRADE_USD", 50)) * 2
+                            )
+                            logger.info(
+                                "[DECAY] improving wallet lifetime=%.0f%%→recent=%.0f%% → +30%% size $%.0f",
+                                _lifetime_wr * 100, _recent_wr * 100, sizing["size_usd"]
+                            )
+
+                    # ── Signal freshness / entry timing ──────────────────────────
+                    # Research: "if price moved >10% since whale entry, edge is gone"
+                    # Only applies to non-insider consensus trades (insiders are time-sensitive)
+                    _whale_entry = float(trade_record.get("price", 0) or 0)
+                    _signal_age_min = 0
+                    _ckey_fr = (
+                        str(trade_record.get("market_slug", "")) + "|"
+                        + str(trade_record.get("outcome", "")) + "|"
+                        + str(trade_record.get("side", ""))
+                    )
+                    if _ckey_fr in CONSENSUS_TRACKER:
+                        _signal_age_min = (time.time() - CONSENSUS_TRACKER[_ckey_fr].get("ts", time.time())) / 60
+                        # Store first_price when signal first arrived
+                        if "first_price" not in CONSENSUS_TRACKER[_ckey_fr]:
+                            CONSENSUS_TRACKER[_ckey_fr]["first_price"] = _whale_entry
+
+                    if _signal_age_min > 0 and _whale_entry > 0 and anomaly_score < 5.0:
+                        _first_price = CONSENSUS_TRACKER.get(_ckey_fr, {}).get("first_price", _whale_entry)
+                        _price_drift = (_whale_entry - _first_price) / _first_price if _first_price > 0 else 0
+
+                        # Age penalty
+                        _age_factor = 1.0
+                        if _signal_age_min > 120:
+                            _age_factor = 0.0    # >2 hours = skip
+                        elif _signal_age_min > 60:
+                            _age_factor = 0.5
+                        elif _signal_age_min > 30:
+                            _age_factor = 0.75
+
+                        # Drift penalty
+                        _drift_factor = 1.0
+                        if _price_drift > 0.25:
+                            _drift_factor = 0.0
+                        elif _price_drift > 0.15:
+                            _drift_factor = 0.4
+                        elif _price_drift > 0.10:
+                            _drift_factor = 0.7
+
+                        _freshness = round(_age_factor * _drift_factor, 3)
+                        if _freshness < 0.3:
+                            logger.info(
+                                "[STALE_SIGNAL] age=%.0fmin drift=%.1f%% freshness=%.2f → skip %s",
+                                _signal_age_min, _price_drift * 100, _freshness,
+                                trade_record.get("market_slug", "")
+                            )
+                            DECISION_COUNTS["cooldown_skip"] += 1
+                            continue
+                        elif _freshness < 1.0:
+                            sizing["size_usd"] = round(sizing["size_usd"] * _freshness, 2)
+                            logger.info(
+                                "[FRESHNESS] age=%.0fmin freshness=%.2f → scaling size to $%.0f",
+                                _signal_age_min, _freshness, sizing["size_usd"]
+                            )
+
+                    # ── Wallet decay detection ─────────────────────────────────────
+                    # If wallet lifetime win rate > 60% but recent 20 trades < 45%
+                    # they've lost their edge — skip or reduce
+                    _lifetime_wr = float(wallet.get("win_rate", 0) or 0)
+                    _recent_wr   = float(wallet.get("recent_win_rate", _lifetime_wr) or _lifetime_wr)
+                    _recent_n    = int(wallet.get("recent_trades_n", 0) or 0)
+                    if _recent_n >= 10:
+                        if _lifetime_wr > 0.60 and _recent_wr < 0.45:
+                            logger.info(
+                                "[DECAY] wallet lifetime=%.0f%% recent=%.0f%% n=%d → SKIP (lost edge)",
+                                _lifetime_wr * 100, _recent_wr * 100, _recent_n
+                            )
+                            DECISION_COUNTS["cooldown_skip"] += 1
+                            continue
+                        elif _lifetime_wr > 0.55 and _recent_wr < 0.48:
+                            _decay_mult = 0.5
+                            sizing["size_usd"] = round(sizing["size_usd"] * _decay_mult, 2)
+                            logger.info(
+                                "[DECAY] moderate decay lifetime=%.0f%% recent=%.0f%% → size halved $%.0f",
+                                _lifetime_wr * 100, _recent_wr * 100, sizing["size_usd"]
+                            )
+                        elif _recent_wr > _lifetime_wr + 0.10 and _recent_n >= 15:
+                            sizing["size_usd"] = min(
+                                round(sizing["size_usd"] * 1.3, 2),
+                                float(getattr(config, "MAX_PAPER_TRADE_USD", 50)) * 2
+                            )
+                            logger.info(
+                                "[DECAY] improving wallet lifetime=%.0f%%→recent=%.0f%% → +30%% size $%.0f",
+                                _lifetime_wr * 100, _recent_wr * 100, sizing["size_usd"]
+                            )
 
                     pos_id = paper.open_position(wallet, trade_record, sizing)
                     if pos_id and int(pos_id) > 0:

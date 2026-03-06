@@ -453,8 +453,12 @@ class PaperTrader:
                 else:
                     vol = cached_vol[0]
 
-                if vol < min_volume:
-                    self.last_skip_reason = f"low_volume:${vol:,.0f}"
+                # BYPASS volume filter for insider signals (anomaly >=5)
+                # Insiders specifically use low-volume niche markets — that's the pattern
+                _anomaly = float(trade.get("anomaly_score", 0) or 0)
+                _vol_threshold = min_volume if _anomaly < 3.0 else (min_volume * 0.5 if _anomaly < 5.0 else 0)
+                if vol < _vol_threshold:
+                    self.last_skip_reason = f"low_volume:${vol:,.0f}_score{_anomaly}"
                     self._update_outbox(outbox_id, "skipped", self.last_skip_reason)
                     return -1
 
