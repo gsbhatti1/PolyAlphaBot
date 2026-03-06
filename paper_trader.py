@@ -240,17 +240,53 @@ class PaperTrader:
         fraction = min(fraction, float(getattr(config, "MAX_POSITION_PCT", 0.10)))
         return round(float(fraction), 4)
 
+    @staticmethod
+    def real_kelly(win_rate: float, market_price: float) -> float:
+        """
+        The correct Polymarket Kelly formula used by every profitable bot:
+            f = (p - m) / (1 - m)
+            p = wallet true win probability (historical win rate)
+            m = current market price (implied probability)
+
+        Only bet when p > m (positive edge). Quarter Kelly for safety.
+        As bankroll grows → positions scale up. As bankroll shrinks → positions scale down.
+        """
+        p = float(win_rate)
+        m = float(market_price)
+        if p <= m or m >= 1.0 or m <= 0.0:
+            return 0.0   # no edge — don't trade
+        edge = (p - m) / (1.0 - m)
+        quarter_kelly = float(getattr(config, "DEFAULT_KELLY_FRACTION", 0.25))
+        fraction = edge * quarter_kelly
+        fraction = min(fraction, float(getattr(config, "MAX_POSITION_PCT", 0.15)))
+        return round(float(fraction), 4)
+
     def size_trade(self, wallet_metrics: dict, trade: dict) -> dict | None:
-        # Use REAL wallet win_rate and profit_factor from DB — not capped alpha
-        # This gives top wallets (Theo4 $22M) bigger positions than bottom wallets ($110k)
+        # Real Kelly: size based on edge vs market price, not just win rate alone
         win_rate = float(wallet_metrics.get("win_rate") or wallet_metrics.get("alpha") or 0.55)
-        win_rate = max(0.51, min(float(win_rate), 0.98))  # realistic bounds only
+        win_rate = max(0.51, min(float(win_rate), 0.98))
 
-        pf = float(wallet_metrics.get("profit_factor") or 1.2)
-        avg_win  = max(1.0, pf)
-        avg_loss = 1.0
+        # Get market price from trade for real Kelly calculation
+        market_price = float(trade.get("price", 0.0) or 0.0)
 
-        fraction = self.kelly_fraction(win_rate, avg_win, avg_loss)
+        # Use real Kelly if we have a valid market price, else fall back to classic
+        if 0.05 < market_price < 0.95:
+            fraction = self.real_kelly(win_rate, market_price)
+        else:
+            pf = float(wallet_metrics.get("profit_factor") or 1.2)
+            fraction = self.kelly_fraction(win_rate, max(1.0, pf), 1.0)
+
+        # PnL tier multiplier: Theo4-tier wallets get bigger allocation
+        wallet_pnl = float(wallet_metrics.get("pnl", 0) or 0)
+        if wallet_pnl >= 5_000_000:
+            pnl_multiplier = 2.0    # Theo4 tier
+        elif wallet_pnl >= 1_000_000:
+            pnl_multiplier = 1.5    # proven whale
+        elif wallet_pnl >= 500_000:
+            pnl_multiplier = 1.25   # solid wallet
+        else:
+            pnl_multiplier = 1.0
+        fraction = min(fraction * pnl_multiplier, float(getattr(config, "MAX_POSITION_PCT", 0.15)))
         if fraction <= 0:
             if getattr(config, "MIRROR_ALWAYS", False) and self.bankroll >= float(getattr(config, "MIN_TRADE_SIZE", 5)):
                 return {"kelly_fraction": 0.0, "size_usd": float(getattr(config, "MIN_TRADE_SIZE", 5)), "bankroll": self.bankroll}
@@ -321,6 +357,22 @@ class PaperTrader:
         except Exception:
             pass
 
+        # ── Bot market filter — skip HFT bot markets (uncopyable edge) ─────────
+        bot_keywords = list(getattr(config, "BOT_MARKET_KEYWORDS", [
+            "updown", "-15m-", "-5m-", "-1h-", "-30m-",
+            "btc-up", "eth-up", "sol-up", "btc-down", "eth-down"
+        ]))
+        if any(kw in market_slug.lower() for kw in bot_keywords):
+            self.last_skip_reason = f"bot_market:{market_slug}"
+            return -1
+
+        # ── Wallet quality filter ─────────────────────────────────────────────
+        wallet_trades = int(wallet.get("num_trades", 0) or 0)
+        min_wallet_trades = int(getattr(config, "MIN_WALLET_TRADES", 100))
+        if wallet_trades < min_wallet_trades:
+            self.last_skip_reason = f"wallet_low_trades:{wallet_trades}<{min_wallet_trades}"
+            return -1
+
         # ── Price quality filter — skip garbage trades before any API calls ────
         entry_price = float(trade.get("price", 0.0))
         min_price   = float(getattr(config, "MIN_COPY_PRICE",  0.35))
@@ -375,6 +427,33 @@ class PaperTrader:
                 self.last_skip_reason = "dead_market_cached"
                 self._update_outbox(outbox_id, "skipped", self.last_skip_reason)
                 return -1
+
+            # ── Volume filter — skip illiquid markets (<$50k) ─────────────
+            min_volume = float(getattr(config, "MIN_MARKET_VOLUME_USD", 50_000))
+            if min_volume > 0:
+                cached_vol = self._volume_cache.get(market_slug)
+                now_v = time.time()
+                if cached_vol is None or (now_v - cached_vol[1]) > 3600:
+                    try:
+                        import httpx as _hx
+                        with _hx.Client(timeout=6.0) as _hc:
+                            r = _hc.get(
+                                f"{getattr(config, 'GAMMA_API', 'https://gamma-api.polymarket.com')}/markets",
+                                params={"slug": market_slug, "limit": 1},
+                            )
+                            data = r.json()
+                            mkt = data[0] if isinstance(data, list) and data else {}
+                            vol = float(mkt.get("volume", mkt.get("volume24hr", 0)) or 0)
+                            self._volume_cache[market_slug] = (vol, now_v)
+                    except Exception:
+                        vol = 999_999   # API failed — don't block on error
+                else:
+                    vol = cached_vol[0]
+
+                if vol < min_volume:
+                    self.last_skip_reason = f"low_volume:${vol:,.0f}"
+                    self._update_outbox(outbox_id, "skipped", self.last_skip_reason)
+                    return -1
 
             quote = None
             try:
@@ -596,29 +675,34 @@ class PaperTrader:
 
     def auto_close_positions(self) -> int:
         """
-        Auto-close paper positions older than AUTO_CLOSE_SEC.
+        Stop-loss / Take-profit monitor.
 
-        Exit price priority:
-          1. Fresh live quote from Polymarket CLOB API (real market price)
-          2. Most recent quote stored in DB for this market
-          3. Entry price as last resort (PnL=0 — only if API and DB both fail)
+        Replaces the old 15-min auto-close which burned 2.4% spread per round trip.
+        Positions now hold until market resolves UNLESS:
+          - Price drops STOP_LOSS_PCT  below entry  (default 30% loss)
+          - Price rises TAKE_PROFIT_PCT above entry (default 50% gain)
+
+        Exit price always fetched live from CLOB API per market.
         """
+        sl_pct = float(getattr(config, "STOP_LOSS_PCT",   0.30))
+        tp_pct = float(getattr(config, "TAKE_PROFIT_PCT", 0.50))
+
+        # If both are disabled and AUTO_CLOSE_SEC also 0, do nothing
         auto_sec = int(getattr(config, "AUTO_CLOSE_SEC", 0) or 0)
-        if auto_sec <= 0:
+        if sl_pct <= 0 and tp_pct <= 0 and auto_sec <= 0:
             return 0
 
-        now = time.time()
+        now    = time.time()
         closed = 0
 
         rows = self.conn.execute(
             """
-            SELECT id, market_slug, outcome, entry_price, opened_at
+            SELECT id, market_slug, outcome, side, entry_price, size_usd, opened_at
             FROM paper_positions
             WHERE (closed_at IS NULL OR closed_at=0 OR status='open')
             """
         ).fetchall()
 
-        # import here to avoid circular at module level
         try:
             import httpx as _httpx
             import poly_api as _poly_api
@@ -632,15 +716,15 @@ class PaperTrader:
                 opened_at = float(r["opened_at"] or 0.0)
                 if opened_at <= 0:
                     continue
-                if (now - opened_at) < auto_sec:
-                    continue
 
                 slug  = r["market_slug"]
                 entry = float(r["entry_price"] or 0.0)
-                exit_price = None
+                if entry <= 0:
+                    continue
 
-                # ── 1. Try live API quote ─────────────────────────────────
-                if _httpx and _poly_api and slug:
+                # ── Fetch live price ──────────────────────────────────────
+                exit_price = None
+                if _httpx and _poly_api and slug and slug not in self._dead_markets:
                     try:
                         with _httpx.Client(timeout=8.0) as http:
                             q = _poly_api.get_quote(http, slug, outcome=r["outcome"])
@@ -648,19 +732,16 @@ class PaperTrader:
                             mid = q.get("mid")
                             if mid is not None:
                                 exit_price = float(mid)
+                        else:
+                            self._dead_markets.add(slug)
                     except Exception:
-                        exit_price = None
+                        pass
 
-                # ── 2. Fall back to most recent DB quote for this market ───
+                # Fall back to DB quote
                 if exit_price is None and slug:
                     try:
                         row = self.conn.execute(
-                            """
-                            SELECT mid FROM quotes
-                            WHERE market_slug=?
-                            ORDER BY ts DESC
-                            LIMIT 1
-                            """,
+                            "SELECT mid FROM quotes WHERE market_slug=? ORDER BY ts DESC LIMIT 1",
                             (slug,),
                         ).fetchone()
                         if row and row["mid"] is not None:
@@ -668,12 +749,41 @@ class PaperTrader:
                     except Exception:
                         pass
 
-                # ── 3. Last resort: entry price (zero PnL) ────────────────
                 if exit_price is None:
-                    exit_price = entry
+                    continue  # can't price it, don't guess
 
-                self.close_position(pos_id, exit_price)
-                closed += 1
+                # ── Check old-style time-based close ─────────────────────
+                if auto_sec > 0 and (now - opened_at) >= auto_sec:
+                    self.close_position(pos_id, exit_price)
+                    closed += 1
+                    continue
+
+                # ── Stop-loss check ───────────────────────────────────────
+                # For BUY: we lose when price drops. For SELL: we lose when price rises.
+                side = str(r["side"] or "BUY").upper()
+                if side == "BUY":
+                    pct_change = (exit_price - entry) / entry
+                else:
+                    pct_change = (entry - exit_price) / entry
+
+                if sl_pct > 0 and pct_change <= -sl_pct:
+                    logger.info(
+                        "[SL] stop-loss hit %s pct=%.2f%% entry=%.4f current=%.4f",
+                        slug, pct_change * 100, entry, exit_price
+                    )
+                    self.close_position(pos_id, exit_price)
+                    closed += 1
+                    continue
+
+                # ── Take-profit check ─────────────────────────────────────
+                if tp_pct > 0 and pct_change >= tp_pct:
+                    logger.info(
+                        "[TP] take-profit hit %s pct=%.2f%% entry=%.4f current=%.4f",
+                        slug, pct_change * 100, entry, exit_price
+                    )
+                    self.close_position(pos_id, exit_price)
+                    closed += 1
+                    continue
 
             except Exception:
                 continue

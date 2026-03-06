@@ -189,23 +189,83 @@ def build_portfolio_report(conn, paper) -> str:
     pnl_emoji  = "🟢" if pnl >= 0 else "🔴"
     ret_emoji  = "📈" if total_return >= 0 else "📉"
 
+    # ── Open positions detail ────────────────────────────────────────────
+    import sqlite3 as _sq
+    open_rows = conn.execute(
+        """
+        SELECT market_slug, side, outcome, entry_price, size_usd, opened_at
+        FROM paper_positions WHERE status='open'
+        ORDER BY opened_at DESC
+        """
+    ).fetchall()
+
+    # ── Last 10 closed trades ─────────────────────────────────────────────
+    closed_rows = conn.execute(
+        """
+        SELECT market_slug, side, outcome, entry_price, exit_price, pnl, closed_at
+        FROM paper_positions WHERE status='closed'
+        ORDER BY closed_at DESC LIMIT 10
+        """
+    ).fetchall()
+
+    # ── Last 8 outbox actions ─────────────────────────────────────────────
+    outbox_rows = conn.execute(
+        """
+        SELECT ts, market_slug, side, status, error
+        FROM order_outbox ORDER BY ts DESC LIMIT 8
+        """
+    ).fetchall()
+
+    import datetime as _dt
+
+    def _ts(t):
+        try:
+            return _dt.datetime.fromtimestamp(float(t)).strftime('%H:%M')
+        except Exception:
+            return '??:??'
+
     lines = [
-        "📊 *Poly Alpha — Portfolio Report*",
-        "",
-        f"💰 Bankroll:     *${bankroll:,.2f}*  (started ${starting:,.0f})",
-        f"{ret_emoji} Total Return:  *{total_return:+.2f}%*",
-        f"{pnl_emoji} Realised PnL:  *${pnl:+,.2f}*",
-        "",
-        f"📦 Open Positions: *{open_pos}*  (${exposure:,.2f} locked)",
-        "",
-        f"📋 Trade Record:",
-        f"   Closed:    {total_trades}",
-        f"   Wins:      {wins}  |  Losses: {losses}",
-        f"   Win Rate:  {win_rate:.1f}%",
-        "",
-        "_Poly Alpha · Paper Mode_",
+        "```",
+        "=" * 49,
+        "  POLY ALPHA BOT — REPORT",
+        "=" * 49,
+        f"  Bankroll:      ${bankroll:,.2f}   (started ${starting:,.0f})",
+        f"  Open:          {open_pos} positions  (${exposure:.2f} locked)",
+        f"  Realised PnL:  ${pnl:+,.2f}",
+        f"  Closed trades: {total_trades}  (W:{wins} L:{losses}  WR:{win_rate:.1f}%)",
+        f"  Total Return:  {total_return:+.2f}%",
     ]
 
+    lines += ["", "  OPEN POSITIONS", "  " + "-" * 47]
+    if open_rows:
+        for r in open_rows:
+            slug = (r['market_slug'] or '')[:22]
+            out  = str(r['outcome'] or '')[:8]
+            lines.append(
+                f"  {_ts(r['opened_at'])} {slug:<22} {r['side']:<4} {out:<8} "
+                f"e={float(r['entry_price']):.3f} ${float(r['size_usd']):.0f}"
+            )
+    else:
+        lines.append("  No open positions")
+
+    lines += ["", "  LAST 10 CLOSED", "  " + "-" * 47]
+    if closed_rows:
+        for r in closed_rows:
+            slug = (r['market_slug'] or '')[:22]
+            pnl_s = f"${float(r['pnl']):+.2f}"
+            lines.append(
+                f"  {_ts(r['closed_at'])} {slug:<22} "
+                f"e={float(r['entry_price']):.3f}→{float(r['exit_price']):.3f} {pnl_s}"
+            )
+    else:
+        lines.append("  No closed trades yet")
+
+    lines += ["", "  LAST 8 ACTIONS", "  " + "-" * 47]
+    for r in outbox_rows:
+        err  = str(r['error'] or '')[:28]
+        lines.append(f"  {_ts(r['ts'])} {r['status']:<8} {(r['market_slug'] or '')[:20]:<20} {r['side']:<4} {err}")
+
+    lines += ["=" * 49, "```"]
     return "\n".join(lines)
 
 def should_send_report(prev: dict | None, cur: dict) -> bool:
@@ -220,6 +280,66 @@ def should_send_report(prev: dict | None, cur: dict) -> bool:
     if cur["open_positions"] != prev["open_positions"] and abs(cur["open_positions"] - prev["open_positions"]) >= int(getattr(config, "REPORT_DELTA_OPEN_POS", 1)):
         return True
     return False
+
+
+async def wallet_rescan_loop(conn):
+    """
+    Weekly wallet quality monitor.
+    Drops wallets whose last-30-day win rate fell below 55% — stale edge.
+    Logs how many wallets were pruned each cycle.
+    """
+    rescan_interval = int(getattr(config, "WALLET_RESCAN_SEC", 7 * 24 * 3600))  # 7 days default
+    min_recent_wr   = float(getattr(config, "WALLET_MIN_RECENT_WIN_RATE", 0.55))
+    min_recent_days = int(getattr(config, "WALLET_MIN_RECENT_DAYS", 30))
+
+    while RUNNING:
+        try:
+            await asyncio.sleep(rescan_interval)
+            if not RUNNING:
+                break
+
+            logger.info("[RESCAN] Starting weekly wallet quality check...")
+            cutoff_ts = time.time() - (min_recent_days * 86400)
+
+            # Find wallets that haven't traded recently or have low recent win rate
+            rows = conn.execute(
+                "SELECT address, username, win_rate, last_trade_ts, pnl FROM wallets WHERE is_active=1"
+            ).fetchall()
+
+            pruned = 0
+            kept   = 0
+            for r in rows:
+                last_ts  = float(r["last_trade_ts"] or 0)
+                win_rate = float(r["win_rate"] or 0)
+                pnl      = float(r["pnl"] or 0)
+
+                # Drop if inactive for 30+ days AND win rate is poor
+                inactive = last_ts < cutoff_ts
+                poor_wr  = win_rate < min_recent_wr
+                tiny_pnl = pnl < 50_000
+
+                if inactive and poor_wr and tiny_pnl:
+                    conn.execute(
+                        "UPDATE wallets SET is_active=0 WHERE address=?",
+                        (r["address"],)
+                    )
+                    pruned += 1
+                else:
+                    kept += 1
+
+            conn.commit()
+            logger.info("[RESCAN] Done: kept=%d pruned=%d (win_rate<%.0f%% + inactive + pnl<$50k)",
+                        kept, pruned, min_recent_wr * 100)
+
+            if pruned > 0:
+                msg = (f"🔄 *Weekly Wallet Rescan*\n"
+                       f"Pruned {pruned} underperforming wallets\n"
+                       f"Active wallets: {kept}")
+                alerts.send_telegram_sync(msg)
+
+        except Exception as e:
+            logger.warning("[RESCAN] error: %r", e)
+            await asyncio.sleep(3600)
 
 
 async def telegram_command_loop(conn, paper):
@@ -494,8 +614,16 @@ async def poll_wallet(
         # Paper trade
         paper_size = 0
         if paper:
-            alpha = wallet.get("alpha", wallet.get("score", wallet.get("alpha_score")))
-            wallet_metrics = {"alpha": alpha}
+            # Pass full wallet so size_trade uses real win_rate + profit_factor
+            wallet_metrics = {
+                "alpha":         wallet.get("alpha_score", wallet.get("alpha", 0.5)),
+                "win_rate":      wallet.get("win_rate", 0.55),
+                "profit_factor": wallet.get("profit_factor", 1.2),
+                "pnl":           wallet.get("pnl", 0),
+            }
+            # Ensure price is in trade dict for real Kelly calculation
+            if "price" not in trade and "price" in trade_record:
+                trade["price"] = trade_record["price"]
             sizing = paper.size_trade(wallet_metrics, trade)
             logger.info("[PAPER_DEBUG] sizing=%s wallet_keys=%s", sizing, list(wallet.keys()))
             if sizing:
@@ -506,6 +634,30 @@ async def poll_wallet(
                     DECISION_COUNTS['cooldown_skip'] += 1
                     logger.info('[PAPER_DEBUG] cooldown active for %s (%.0fs left) -> skip', addr, cd-(now-last))
                 else:
+                    # ── Consensus filter: only trade when 2+ wallets agree ──
+                    min_consensus = int(getattr(config, 'MIN_CONSENSUS_WALLETS', 1))
+                    if min_consensus > 1:
+                        slug_check  = trade_record.get("market_slug", "")
+                        out_check   = trade_record.get("outcome", "")
+                        side_check  = trade_record.get("side", "")
+                        try:
+                            consensus_count = paper.conn.execute(
+                                """
+                                SELECT COUNT(DISTINCT wallet_address) as n
+                                FROM paper_positions
+                                WHERE market_slug=? AND outcome=? AND side=?
+                                AND (status='open' OR opened_at > ?)
+                                """,
+                                (slug_check, out_check, side_check, time.time() - 3600),
+                            ).fetchone()["n"]
+                        except Exception:
+                            consensus_count = 0
+                        if consensus_count < (min_consensus - 1):
+                            DECISION_COUNTS['cooldown_skip'] += 1
+                            logger.info('[PAPER_DEBUG] consensus skip %s: only %d/%d wallets',
+                                        slug_check, consensus_count + 1, min_consensus)
+                            continue
+
                     pos_id = paper.open_position(wallet, trade_record, sizing)
                     if pos_id and int(pos_id) > 0:
                         LAST_PAPER_TS[addr] = now
@@ -697,6 +849,7 @@ async def run_monitor(
     paper = None if no_paper else PaperTrader(conn, bankroll)
     if paper:
         asyncio.create_task(telegram_command_loop(conn, paper))  # /status /report
+        asyncio.create_task(wallet_rescan_loop(conn))            # weekly wallet refresh
 
     console.print(Panel.fit(
         f"[bold cyan]Polymarket Alpha Monitor[/]\n"
