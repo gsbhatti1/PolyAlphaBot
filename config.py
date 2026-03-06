@@ -64,8 +64,9 @@ SKIP_SELL_BELOW  = 0.40   # never SELL outcome priced <40% (max gain tiny, max l
 # ── Bot market blocklist ──────────────────────────────────────────────────
 # These are HFT bot markets — uncopyable edge, guaranteed spread loss
 BOT_MARKET_KEYWORDS = [
-    "updown", "-15m-", "-5m-", "-1h-", "-30m-",
-    "btc-up", "eth-up", "sol-up", "btc-down", "eth-down"
+    "updown", "15m-", "5m-", "1h-", "30m-",
+    "btc-up", "eth-up", "sol-up", "btc-down", "eth-down",
+    "-15m", "-5m", "-1h", "-30m"
 ]
 
 # ── Consensus filter ──────────────────────────────────────────────────────
@@ -74,7 +75,7 @@ BOT_MARKET_KEYWORDS = [
 MIN_CONSENSUS_WALLETS = 2
 
 # ── Wallet quality filter ─────────────────────────────────────────────────
-MIN_WALLET_TRADES     = 100     # ignore wallets with fewer than 100 trades
+MIN_WALLET_TRADES     = 30      # lower threshold — catch more human traders
 MIN_WALLET_DAYS       = 90      # ignore wallets active less than 90 days
 
 # ── Market volume filter ──────────────────────────────────────────────────
@@ -99,7 +100,7 @@ MAX_OPEN_EXPOSURE_USD = 500             # max $500 locked total
 MAX_MARKET_EXPOSURE_USD = 150     # per (market,outcome,side)
 MAX_MARKET_POSITIONS = 5
 COOLDOWN_SECONDS_PER_MARKET = 10   # faster recycle (was 20)
-WALLET_COOLDOWN_SEC = 120             # 2 min cooldown
+WALLET_COOLDOWN_SEC = 0               # disabled — consensus filter handles throttling
 
 # ── Alerts ─────────────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")

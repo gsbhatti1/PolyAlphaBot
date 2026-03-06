@@ -76,6 +76,9 @@ class PaperTrader:
         self.pos_block_until = 0.0
         self._last_throttle_log_ts = 0.0
         self._dead_markets: set = set()  # markets that returned no quote — skip for session
+        self._volume_cache: dict = {}     # market_slug -> (volume_usd, ts)
+        self._volume_cache: dict = {}     # market_slug -> (volume_usd, ts)
+        self._volume_cache: dict = {}     # market_slug -> (volume_usd, ts)
 
     def _load_state(self):
         row = self.conn.execute("SELECT bankroll FROM paper_ledger ORDER BY id DESC LIMIT 1").fetchone()

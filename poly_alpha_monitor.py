@@ -627,16 +627,50 @@ async def poll_wallet(
             sizing = paper.size_trade(wallet_metrics, trade)
             logger.info("[PAPER_DEBUG] sizing=%s wallet_keys=%s", sizing, list(wallet.keys()))
             if sizing:
-                cd = int(getattr(config, 'WALLET_COOLDOWN_SEC', 900))
+                cd = int(getattr(config, 'WALLET_COOLDOWN_SEC', 0))
                 now = time.time()
                 last = LAST_PAPER_TS.get(addr, 0)
                 if (now - last) < cd:
                     DECISION_COUNTS['cooldown_skip'] += 1
                     logger.info('[PAPER_DEBUG] cooldown active for %s (%.0fs left) -> skip', addr, cd-(now-last))
                 else:
+                    # ── Insider signal detector ───────────────────────────
+                    # Fresh wallet + outsized bet = potential insider
+                    # These are the most profitable signals on Polymarket
+                    wallet_age_days = 0
+                    first_seen = wallet.get("first_seen", 0)
+                    if first_seen:
+                        wallet_age_days = (time.time() - float(first_seen)) / 86400
+                    trade_size  = float(trade_record.get("size_usd", 0) or 0)
+                    avg_bet     = float(wallet.get("avg_bet_size", 0) or 50)
+                    # Only flag truly fresh wallets making outsized bets
+                    # avg_bet defaults to $50 so require real avg > $100 to avoid false positives
+                    is_insider_signal = (
+                        wallet_age_days < 30 and trade_size > 2000
+                    )
+                    if is_insider_signal:
+                        logger.info("[INSIDER] potential insider signal: wallet_age=%.1fd size=$%.0f avg=$%.0f %s",
+                                    wallet_age_days, trade_size, avg_bet, trade_record.get("market_slug",""))
+                        alerts.send_telegram_sync("INSIDER SIGNAL: " + str(trade_record.get("market_slug","")) + " age=" + str(round(wallet_age_days,1)) + "d size=$" + str(int(trade_size)))
+
+                    # ── Conviction multiplier ─────────────────────────────
+                    # Wallet betting 3x+ their average = high conviction
+                    # Copy at full Kelly. Normal size = half Kelly.
+                    if avg_bet > 100 and trade_size >= avg_bet * 3:
+                        conviction = "high"
+                        sizing["size_usd"] = min(
+                            sizing["size_usd"] * 2.0,
+                            float(getattr(config, "MAX_PAPER_TRADE_USD", 50)) * 3
+                        )
+                        logger.info("[CONVICTION] high conviction trade %.0fx avg -> size $%.0f",
+                                    trade_size/avg_bet, sizing["size_usd"])
+                    else:
+                        conviction = "normal"
+
                     # ── Consensus filter: only trade when 2+ wallets agree ──
+                    # EXCEPTION: insider signals bypass consensus — act immediately
                     min_consensus = int(getattr(config, 'MIN_CONSENSUS_WALLETS', 1))
-                    if min_consensus > 1:
+                    if min_consensus > 1 and not is_insider_signal:
                         slug_check  = trade_record.get("market_slug", "")
                         out_check   = trade_record.get("outcome", "")
                         side_check  = trade_record.get("side", "")
