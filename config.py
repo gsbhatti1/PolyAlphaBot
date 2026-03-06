@@ -54,13 +54,19 @@ MIN_TRADE_SIZE = 5                      # min $5
 # ── Paper Trader Defaults (sizing) ──────────────────────────
 STARTING_BANKROLL = 1000                # reset
 DEFAULT_KELLY_FRACTION = 0.35     # full kelly is explosive; 0.35 is aggressive but survivable
-MAX_PAPER_TRADE_USD = 10                # HARD cap 0 per trade
+MAX_PAPER_TRADE_USD = 50                # HARD cap 0 per trade
+
+# ── Trade quality filters ─────────────────────────────────────────────────
+# Only copy trades in the 35%-85% probability window — real edge lives here
+MIN_COPY_PRICE   = 0.35   # skip longshots below 35% (alpha wallets use as hedges)
+MAX_COPY_PRICE   = 0.85   # skip near-certain outcomes (tiny upside, capital locked)
+SKIP_SELL_BELOW  = 0.40   # never SELL outcome priced <40% (max gain tiny, max loss huge)
 MAX_POSITION_PCT = 0.10           # 35% is too chunky for high-frequency; use 10%
 
 # ── Safety rails (prevent blowups + keep flow) ──────────────
 MAX_TRADES_PER_HOUR = 300         # raise throughput ceiling
 MAX_OPEN_POSITIONS = 10                 # max 10 open positions
-MAX_OPEN_EXPOSURE_USD = 100             # max $100 locked total
+MAX_OPEN_EXPOSURE_USD = 500             # max $500 locked total
 MAX_MARKET_EXPOSURE_USD = 150     # per (market,outcome,side)
 MAX_MARKET_POSITIONS = 5
 COOLDOWN_SECONDS_PER_MARKET = 10   # faster recycle (was 20)

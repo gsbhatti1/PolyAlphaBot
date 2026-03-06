@@ -75,6 +75,7 @@ class PaperTrader:
         self.cap_block_until = 0.0
         self.pos_block_until = 0.0
         self._last_throttle_log_ts = 0.0
+        self._dead_markets: set = set()  # markets that returned no quote — skip for session
 
     def _load_state(self):
         row = self.conn.execute("SELECT bankroll FROM paper_ledger ORDER BY id DESC LIMIT 1").fetchone()
@@ -240,17 +241,13 @@ class PaperTrader:
         return round(float(fraction), 4)
 
     def size_trade(self, wallet_metrics: dict, trade: dict) -> dict | None:
-        alpha = wallet_metrics.get("alpha")
-        if alpha is None:
-            alpha = wallet_metrics.get("score")
+        # Use REAL wallet win_rate and profit_factor from DB — not capped alpha
+        # This gives top wallets (Theo4 $22M) bigger positions than bottom wallets ($110k)
+        win_rate = float(wallet_metrics.get("win_rate") or wallet_metrics.get("alpha") or 0.55)
+        win_rate = max(0.51, min(float(win_rate), 0.98))  # realistic bounds only
 
-        if isinstance(alpha, (int, float)):
-            win_rate = max(0.51, min(float(alpha), 0.75))
-        else:
-            win_rate = float(wallet_metrics.get("win_rate", 0.55))
-
-        pf = float(wallet_metrics.get("profit_factor", 1.2))
-        avg_win = pf
+        pf = float(wallet_metrics.get("profit_factor") or 1.2)
+        avg_win  = max(1.0, pf)
         avg_loss = 1.0
 
         fraction = self.kelly_fraction(win_rate, avg_win, avg_loss)
@@ -324,6 +321,36 @@ class PaperTrader:
         except Exception:
             pass
 
+        # ── Price quality filter — skip garbage trades before any API calls ────
+        entry_price = float(trade.get("price", 0.0))
+        min_price   = float(getattr(config, "MIN_COPY_PRICE",  0.35))
+        max_price   = float(getattr(config, "MAX_COPY_PRICE",  0.85))
+        skip_sell_below = float(getattr(config, "SKIP_SELL_BELOW", 0.40))
+
+        if entry_price > 0:
+            # Skip near-certain outcomes (no edge, tiny upside) and longshots
+            if entry_price < min_price or entry_price > max_price:
+                self.last_skip_reason = f"price_filter:{entry_price:.3f}_outside_{min_price}-{max_price}"
+                return -1
+            # Skip SELL on low-probability outcomes: max gain is tiny, max loss is large
+            if side == "SELL" and entry_price < skip_sell_below:
+                self.last_skip_reason = f"sell_filter:{entry_price:.3f}_below_{skip_sell_below}"
+                return -1
+
+        # ── PnL-tier position multiplier — top wallets get bigger bets ───────
+        wallet_pnl = float(wallet.get("pnl", 0) or 0)
+        pnl_multiplier = 1.0
+        if wallet_pnl >= 5_000_000:
+            pnl_multiplier = 3.0   # Theo4, bizyugo tier — 3x
+        elif wallet_pnl >= 1_000_000:
+            pnl_multiplier = 2.0   # Mid-tier proven wallets — 2x
+        elif wallet_pnl >= 500_000:
+            pnl_multiplier = 1.5   # Good wallets — 1.5x
+
+        if pnl_multiplier > 1.0:
+            max_trade = float(getattr(config, "MAX_PAPER_TRADE_USD", 50))
+            size_usd  = round(min(size_usd * pnl_multiplier, max_trade * pnl_multiplier), 2)
+
         # create ONE outbox row (attempt) up front
         outbox_id = self._log_outbox(
             mode, market_slug, side, outcome, "MARKET", size_usd,
@@ -343,7 +370,12 @@ class PaperTrader:
                 "opened_at": time.time(),
             }
 
-            # fetch quote
+            # fetch quote — skip dead/resolved markets without API call
+            if market_slug in self._dead_markets:
+                self.last_skip_reason = "dead_market_cached"
+                self._update_outbox(outbox_id, "skipped", self.last_skip_reason)
+                return -1
+
             quote = None
             try:
                 import httpx
@@ -356,6 +388,7 @@ class PaperTrader:
                 return -1
 
             if not isinstance(quote, dict):
+                self._dead_markets.add(market_slug)  # cache — never retry this market
                 qtype,qsnip=_qinfo(quote); self.last_skip_reason = f"quote_invalid:not_dict type={qtype} q={qsnip}"
                 self._update_outbox(outbox_id, "skipped", self.last_skip_reason, payload=str(quote))
                 return -1

@@ -198,7 +198,7 @@ def upsert_wallet(conn: sqlite3.Connection, wallet: dict):
         ) VALUES (
             :address, :username, :alpha_score, :pnl, :win_rate, :num_trades,
             :profit_factor, :sharpe_ratio, :consistency, :recency_score,
-            :visibility, :avg_bet_size, :markets_traded, :first_seen, :last_updated, :is_active, :meta
+            :visibility, :avg_bet_size, :markets_traded, :first_seen, :last_updated, :meta
         ) ON CONFLICT(address) DO UPDATE SET
             alpha_score=:alpha_score, pnl=:pnl, win_rate=:win_rate,
             num_trades=:num_trades, profit_factor=:profit_factor,
