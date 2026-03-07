@@ -505,6 +505,29 @@ def build_dashboard(
     )
 
 
+def report_state(conn, paper):
+    """Build a dict of current portfolio state for change-driven reporting."""
+    s = paper.get_summary()
+    return {
+        "bankroll": float(s.get("bankroll", 0)),
+        "pnl": float(s.get("total_pnl", 0)),
+        "open_positions": int(s.get("open_positions", 0)),
+        "open_exposure": float(s.get("open_exposure", 0)),
+    }
+
+
+async def run_maintenance(conn, max_wallets):
+    """Prune dead wallets and refill from inactive pool."""
+    pruned = db.prune_dead_wallets(conn, DEAD_WALLET_DAYS)
+    active = db.get_active_wallets(conn, limit=max_wallets)
+    slots = max_wallets - len(active)
+    added = []
+    if slots > 0 and REFILL_FROM_INACTIVE:
+        added = db.activate_best_inactive(conn, slots)
+    active_n = len(db.get_active_wallets(conn, limit=max_wallets))
+    return pruned, added, active_n
+
+
 async def poll_wallet(
     client: httpx.AsyncClient,
     conn,
@@ -807,7 +830,7 @@ async def poll_wallet(
                                 _lifetime_wr * 100, _recent_wr * 100, sizing["size_usd"]
                             )
 
-                    logger.info("[DEBUG_PREOPEN] about to call open_position slug=%s side=%s size=$%.0f", market_slug, side, sizing["size_usd"])
+                    logger.info("[DEBUG_PREOPEN] about to call open_position slug=%s side=%s size=$%.0f", trade_record.get("market_slug", ""), trade_record.get("side", ""), sizing["size_usd"])
                     pos_id = paper.open_position(wallet, trade_record, sizing)
                     if pos_id and int(pos_id) > 0:
                         LAST_PAPER_TS[addr] = now

@@ -105,6 +105,72 @@ def init_db(conn: sqlite3.Connection):
         CREATE INDEX IF NOT EXISTS idx_trades_wallet ON trades(wallet_address);
         CREATE INDEX IF NOT EXISTS idx_trades_ts ON trades(timestamp);
         CREATE INDEX IF NOT EXISTS idx_paper_status ON paper_positions(status);
+
+        CREATE TABLE IF NOT EXISTS order_outbox (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts          REAL,
+            updated_ts  REAL,
+            mode        TEXT,
+            market_slug TEXT,
+            side        TEXT,
+            outcome     TEXT,
+            order_type  TEXT,
+            size_usd    REAL,
+            payload     TEXT DEFAULT '{}',
+            status      TEXT,
+            error       TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS fills (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts          REAL,
+            order_id    INTEGER,
+            outbox_id   INTEGER,
+            market_slug TEXT,
+            side        TEXT,
+            outcome     TEXT,
+            size_usd    REAL,
+            bid         REAL,
+            ask         REAL,
+            fill_price  REAL,
+            slip_bps    REAL,
+            fee_usd     REAL,
+            notes       TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS quotes (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_slug TEXT,
+            ts          REAL,
+            bid         REAL,
+            ask         REAL,
+            mid         REAL,
+            spread      REAL,
+            source      TEXT
+        );
+
+        CREATE TABLE IF NOT EXISTS trade_features (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            tx_hash         TEXT UNIQUE,
+            detected_at     REAL,
+            wallet_address  TEXT,
+            market_slug     TEXT,
+            outcome         TEXT,
+            side            TEXT,
+            size_usd        REAL,
+            price           REAL,
+            timestamp       REAL,
+            features        TEXT,
+            resolved_at     REAL,
+            result          REAL,
+            pnl             REAL
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_outbox_status ON order_outbox(status);
+        CREATE INDEX IF NOT EXISTS idx_outbox_ts ON order_outbox(ts);
+        CREATE INDEX IF NOT EXISTS idx_fills_outbox ON fills(outbox_id);
+        CREATE INDEX IF NOT EXISTS idx_quotes_slug ON quotes(market_slug);
+        CREATE INDEX IF NOT EXISTS idx_features_tx ON trade_features(tx_hash);
     """)
 
     migrate_wallets(conn)
@@ -333,7 +399,7 @@ def snapshot_ledger(conn, bankroll=None, open_positions=None, total_pnl=None,
     ts = timestamp if timestamp is not None else _time.time()
     try:
         conn.execute(
-            "INSERT INTO paper_ledger (ts, bankroll) VALUES (?, ?)",
+            "INSERT INTO paper_ledger (timestamp, bankroll) VALUES (?, ?)",
             (ts, float(bankroll) if bankroll is not None else 0.0),
         )
     except Exception:

@@ -77,7 +77,6 @@ class PaperTrader:
         self._last_throttle_log_ts = 0.0
         self._dead_markets: set = set()  # markets that returned no quote — skip for session
         self._volume_cache: dict = {}     # market_slug -> (volume_usd, ts)
-        self._volume_cache: dict = {}     # market_slug -> (volume_usd, ts)
 
     def _load_state(self):
         row = self.conn.execute("SELECT bankroll FROM paper_ledger ORDER BY id DESC LIMIT 1").fetchone()
@@ -314,7 +313,6 @@ class PaperTrader:
     # ---------- Execution (single-row outbox lifecycle) ----------
 
     def open_position(self, wallet: dict, trade: dict, sizing: dict) -> int:
-        self.last_skip_reason = 'open_position_returned_None'  # AUTOPATCH
         self.last_skip_reason = None
         mode = getattr(config, "EXECUTION_MODE", "PAPER")
         now = time.time()
@@ -396,19 +394,7 @@ class PaperTrader:
                 self._log_outbox(mode, market_slug, side, outcome, "MARKET", size_usd, status="skipped", error=self.last_skip_reason)
                 return -1
 
-        # ── PnL-tier position multiplier — top wallets get bigger bets ───────
-        wallet_pnl = float(wallet.get("pnl", 0) or 0)
-        pnl_multiplier = 1.0
-        if wallet_pnl >= 5_000_000:
-            pnl_multiplier = 3.0   # Theo4, bizyugo tier — 3x
-        elif wallet_pnl >= 1_000_000:
-            pnl_multiplier = 2.0   # Mid-tier proven wallets — 2x
-        elif wallet_pnl >= 500_000:
-            pnl_multiplier = 1.5   # Good wallets — 1.5x
-
-        if pnl_multiplier > 1.0:
-            max_trade = float(getattr(config, "MAX_PAPER_TRADE_USD", 50))
-            size_usd  = round(min(size_usd * pnl_multiplier, max_trade * pnl_multiplier), 2)
+        # (PnL tier multiplier already applied in size_trade() — do not double-apply here)
 
         # create ONE outbox row (attempt) up front
         outbox_id = self._log_outbox(
