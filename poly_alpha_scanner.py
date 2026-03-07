@@ -128,6 +128,15 @@ def ultra_compute_metrics(address: str, leaderboard_entry: dict, trades: list, p
     # Trade analysis
     trade_entries = [t for t in trades if t.get("type", "TRADE") == "TRADE"]
     m.num_trades = len(trade_entries)
+
+    # Real markets_traded: count unique market slugs from trade history
+    # Activity API returns slug/eventSlug — try both
+    _mkt_slugs = set()
+    for _t in trade_entries:
+        _slug = _t.get("slug") or _t.get("market_slug") or _t.get("eventSlug") or ""
+        if _slug:
+            _mkt_slugs.add(_slug)
+    m.markets_traded = len(_mkt_slugs)
     
     # Quick win rate estimation
     if m.pnl > 0 and m.num_trades > 0:

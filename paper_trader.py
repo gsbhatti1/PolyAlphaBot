@@ -355,6 +355,7 @@ class PaperTrader:
             ).fetchone()
             if _dup_early:
                 self.last_skip_reason = "duplicate_open_position"
+                self._log_outbox(mode, market_slug, side, outcome, "MARKET", size_usd, status="skipped", error=self.last_skip_reason)
                 return -1
         except Exception:
             pass
@@ -366,6 +367,7 @@ class PaperTrader:
         ]))
         if any(kw in market_slug.lower() for kw in bot_keywords):
             self.last_skip_reason = f"bot_market:{market_slug}"
+            self._log_outbox(mode, market_slug, side, outcome, "MARKET", size_usd, status="skipped", error=self.last_skip_reason)
             return -1
 
         # ── Wallet quality filter ─────────────────────────────────────────────
@@ -373,6 +375,7 @@ class PaperTrader:
         min_wallet_trades = int(getattr(config, "MIN_WALLET_TRADES", 100))
         if wallet_trades < min_wallet_trades:
             self.last_skip_reason = f"wallet_low_trades:{wallet_trades}<{min_wallet_trades}"
+            self._log_outbox(mode, market_slug, side, outcome, "MARKET", size_usd, status="skipped", error=self.last_skip_reason)
             return -1
 
         # ── Price quality filter — skip garbage trades before any API calls ────
@@ -385,10 +388,12 @@ class PaperTrader:
             # Skip near-certain outcomes (no edge, tiny upside) and longshots
             if entry_price < min_price or entry_price > max_price:
                 self.last_skip_reason = f"price_filter:{entry_price:.3f}_outside_{min_price}-{max_price}"
+                self._log_outbox(mode, market_slug, side, outcome, "MARKET", size_usd, status="skipped", error=self.last_skip_reason)
                 return -1
             # Skip SELL on low-probability outcomes: max gain is tiny, max loss is large
             if side == "SELL" and entry_price < skip_sell_below:
                 self.last_skip_reason = f"sell_filter:{entry_price:.3f}_below_{skip_sell_below}"
+                self._log_outbox(mode, market_slug, side, outcome, "MARKET", size_usd, status="skipped", error=self.last_skip_reason)
                 return -1
 
         # ── PnL-tier position multiplier — top wallets get bigger bets ───────
@@ -455,7 +460,7 @@ class PaperTrader:
                 # BYPASS volume filter for insider signals (anomaly >=5)
                 # Insiders specifically use low-volume niche markets — that's the pattern
                 _anomaly = float(trade.get("anomaly_score", 0) or 0)
-                _vol_threshold = min_volume if _anomaly < 3.0 else (min_volume * 0.5 if _anomaly < 5.0 else 0)
+                _vol_threshold = min_volume if _anomaly < 3.0 else 0
                 if vol < _vol_threshold:
                     self.last_skip_reason = f"low_volume:${vol:,.0f}_score{_anomaly}"
                     self._update_outbox(outbox_id, "skipped", self.last_skip_reason)

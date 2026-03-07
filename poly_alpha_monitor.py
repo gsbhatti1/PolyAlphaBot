@@ -542,7 +542,7 @@ async def poll_wallet(
 
         # Activity fields: usdcSize (USD), size (tokens), price, side, etc.
         size = float(trade.get("usdcSize", trade.get("size", 0)) or 0)
-        if size < min_size:
+        if size < 0:  # disabled — we size ourselves via Kelly
             DECISION_COUNTS['min_size_skip'] += 1
             continue
 
@@ -634,24 +634,46 @@ async def poll_wallet(
                     DECISION_COUNTS['cooldown_skip'] += 1
                     logger.info('[PAPER_DEBUG] cooldown active for %s (%.0fs left) -> skip', addr, cd-(now-last))
                 else:
-                    # ── Insider signal detector ───────────────────────────
-                    # Fresh wallet + outsized bet = potential insider
-                    # These are the most profitable signals on Polymarket
-                    wallet_age_days = 0
+                    # ANOMALY SCORE SYSTEM (0-10)
+                    # Validated: Iran strike 3d $61k->9.5, Liverpool 15d $56k->5.0
+                    anomaly_score = 0.0
                     first_seen = wallet.get("first_seen", 0)
-                    if first_seen:
-                        wallet_age_days = (time.time() - float(first_seen)) / 86400
-                    trade_size  = float(trade_record.get("size_usd", 0) or 0)
-                    avg_bet     = float(wallet.get("avg_bet_size", 0) or 50)
-                    # Only flag truly fresh wallets making outsized bets
-                    # avg_bet defaults to $50 so require real avg > $100 to avoid false positives
-                    is_insider_signal = (
-                        wallet_age_days < 30 and trade_size > 2000
-                    )
-                    if is_insider_signal:
-                        logger.info("[INSIDER] potential insider signal: wallet_age=%.1fd size=$%.0f avg=$%.0f %s",
-                                    wallet_age_days, trade_size, avg_bet, trade_record.get("market_slug",""))
-                        alerts.send_telegram_sync("INSIDER SIGNAL: " + str(trade_record.get("market_slug","")) + " age=" + str(round(wallet_age_days,1)) + "d size=$" + str(int(trade_size)))
+                    wallet_age_days = (time.time() - float(first_seen)) / 86400 if first_seen else 9999
+                    if wallet_age_days < 1:    anomaly_score += 4.0
+                    elif wallet_age_days < 7:   anomaly_score += 3.0
+                    elif wallet_age_days < 30:  anomaly_score += 1.5
+
+                    trade_size = float(trade_record.get("size_usd", 0) or 0)
+                    avg_bet    = float(wallet.get("avg_bet_size", 0) or 50)
+                    if trade_size >= 10_000:    anomaly_score += 2.0
+                    elif trade_size >= 2_000:   anomaly_score += 1.0
+                    elif trade_size >= 500:     anomaly_score += 0.5
+
+                    num_markets = int(wallet.get("markets_traded", wallet.get("num_markets_traded", wallet.get("market_count", 0))) or 0)
+                    if 0 < num_markets <= 2:    anomaly_score += 2.0
+                    elif 0 < num_markets <= 5:  anomaly_score += 0.5
+
+                    _cv = getattr(paper, "_volume_cache", {}).get(trade_record.get("market_slug",""))
+                    if _cv:
+                        if 0 < _cv[0] < 20_000:  anomaly_score += 1.5
+                        elif _cv[0] < 50_000:     anomaly_score += 0.5
+
+                    if avg_bet > 100 and trade_size >= avg_bet * 5:
+                        anomaly_score += 1.0
+
+                    anomaly_score     = round(anomaly_score, 1)
+                    is_insider_signal = anomaly_score >= 5.0
+                    is_super_insider  = anomaly_score >= 7.0
+                    trade_record["anomaly_score"] = anomaly_score
+
+                    if anomaly_score >= 3.0:
+                        logger.info("[ANOMALY] score=%.1f age=%.1fd size=$%.0f mkts=%d slug=%s",
+                            anomaly_score, wallet_age_days, trade_size, num_markets,
+                            trade_record.get("market_slug",""))
+                    if is_super_insider:
+                        alerts.send_telegram_sync("SUPER INSIDER score=" + str(anomaly_score) + " | " + str(trade_record.get("market_slug","")) + " age=" + str(round(wallet_age_days,1)) + "d $" + str(int(trade_size)))
+                    elif is_insider_signal:
+                        alerts.send_telegram_sync("INSIDER score=" + str(anomaly_score) + " | " + str(trade_record.get("market_slug","")) + " age=" + str(round(wallet_age_days,1)) + "d $" + str(int(trade_size)))
 
                     # ── Conviction multiplier ─────────────────────────────
                     # Wallet betting 3x+ their average = high conviction

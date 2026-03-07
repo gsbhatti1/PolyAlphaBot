@@ -1,7 +1,5 @@
-"""
-Configuration for Polymarket Hidden Alpha Scanner + Monitor (Aggressive Preset).
-Start aggressive, then tone down after confirming execution.
-"""
+"""Polymarket Alpha Bot — Configuration."""
+
 import os
 
 # ── API Endpoints ──────────────────────────────────────────────────────────
@@ -57,8 +55,8 @@ MAX_PAPER_TRADE_USD = 50                # HARD cap 0 per trade
 
 # ── Trade quality filters ─────────────────────────────────────────────────
 # Only copy trades in the 35%-85% probability window — real edge lives here
-MIN_COPY_PRICE   = 0.35   # skip longshots below 35% (alpha wallets use as hedges)
-MAX_COPY_PRICE   = 0.85   # skip near-certain outcomes (tiny upside, capital locked)
+MIN_COPY_PRICE   = 0.30   # skip longshots below 35% (alpha wallets use as hedges)
+MAX_COPY_PRICE   = 0.92   # skip near-certain outcomes (tiny upside, capital locked)
 SKIP_SELL_BELOW  = 0.40   # never SELL outcome priced <40% (max gain tiny, max loss huge)
 
 # ── Bot market blocklist ──────────────────────────────────────────────────
@@ -72,14 +70,14 @@ BOT_MARKET_KEYWORDS = [
 # ── Consensus filter ──────────────────────────────────────────────────────
 # Only open a trade when this many watched wallets are in same market+outcome
 # 1 = copy everyone (current, noisy), 2 = require confirmation (recommended)
-MIN_CONSENSUS_WALLETS = 2
+MIN_CONSENSUS_WALLETS = 1
 
 # ── Wallet quality filter ─────────────────────────────────────────────────
 MIN_WALLET_TRADES     = 30      # lower threshold — catch more human traders
-MIN_WALLET_DAYS       = 90      # ignore wallets active less than 90 days
+MIN_WALLET_DAYS       = 30      # ignore wallets active less than 90 days
 
 # ── Market volume filter ──────────────────────────────────────────────────
-MIN_MARKET_VOLUME_USD = 50_000
+MIN_MARKET_VOLUME_USD = 10_000
 
 # ── Anomaly / Insider scoring ──────────────────────────────────────────
 # Composite score 0-10 based on wallet age, bet size, market concentration
@@ -108,7 +106,7 @@ WALLET_MIN_RECENT_DAYS     = 30       # look at last 30 days of activity
 # ── Safety rails (prevent blowups + keep flow) ──────────────
 MAX_TRADES_PER_HOUR = 300         # raise throughput ceiling
 MAX_OPEN_POSITIONS = 10                 # max 10 open positions
-MAX_OPEN_EXPOSURE_USD = 500             # max $500 locked total
+MAX_OPEN_EXPOSURE_USD = 600             # max $500 locked total
 MAX_MARKET_EXPOSURE_USD = 150     # per (market,outcome,side)
 MAX_MARKET_POSITIONS = 5
 COOLDOWN_SECONDS_PER_MARKET = 10   # faster recycle (was 20)
