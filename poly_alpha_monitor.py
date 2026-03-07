@@ -131,6 +131,7 @@ TELEGRAM_UPDATE_OFFSET = None
 LAST_REPORT_STATE = None
 LAST_REPORT_SENT_TS = 0
 LAST_PAPER_TS = {}
+CONSENSUS_TRACKER = {}
 LAST_PORTFOLIO_TG_TS = 0
 LAST_DECISION_LOG_TS = 0
 DECISION_COUNTS = {
@@ -166,7 +167,7 @@ def log_decisions_summary():
             DECISION_COUNTS.get('min_size_skip',0),
             DECISION_COUNTS.get('db_dup_trade',0),
         )
-    except Exception:
+    except Exception as _poll_err:
         pass
 
 
@@ -221,7 +222,7 @@ def build_portfolio_report(conn, paper) -> str:
     def _ts(t):
         try:
             return _dt.datetime.fromtimestamp(float(t)).strftime('%H:%M')
-        except Exception:
+        except Exception as _poll_err:
             return '??:??'
 
     lines = [
@@ -713,7 +714,7 @@ async def poll_wallet(
                                 """,
                                 (slug_check, out_check, side_check, time.time() - 3600),
                             ).fetchone()["n"]
-                        except Exception:
+                        except Exception as _poll_err:
                             consensus_count = 0
                         if consensus_count < (min_consensus - 1):
                             DECISION_COUNTS['cooldown_skip'] += 1
@@ -806,6 +807,7 @@ async def poll_wallet(
                                 _lifetime_wr * 100, _recent_wr * 100, sizing["size_usd"]
                             )
 
+                    logger.info("[DEBUG_PREOPEN] about to call open_position slug=%s side=%s size=$%.0f", market_slug, side, sizing["size_usd"])
                     pos_id = paper.open_position(wallet, trade_record, sizing)
                     if pos_id and int(pos_id) > 0:
                         LAST_PAPER_TS[addr] = now
@@ -912,7 +914,7 @@ async def check_resolutions(
             result = None
             try:
                 result = float(c.get("exit_price"))
-            except Exception:
+            except Exception as _poll_err:
                 pass
             conn.execute(
                 """
@@ -1038,8 +1040,8 @@ async def run_monitor(
                       try:
                           new = await poll_wallet(client, conn, wallet, paper, min_size)
                           recent_trades.extend(new)
-                      except Exception:
-                          pass
+                      except Exception as _poll_err:
+                          logger.warning("[POLL_ERR] wallet=%s err=%r", wallet.get("address","?"), _poll_err)
 
                   recent_trades = recent_trades[-50:]
 
@@ -1049,15 +1051,15 @@ async def run_monitor(
                           n_closed = paper.auto_close_positions()
                           if n_closed:
                               logger.info('[PAPER_DEBUG] auto_closed=%d', n_closed)
-                      except Exception:
-                          pass
+                      except Exception as _poll_err:
+                          logger.warning("[POLL_ERR] wallet=%s err=%r", wallet.get("address","?"), _poll_err)
 
 
                   if paper and poll_count % 10 == 0:
                       try:
                           await check_resolutions(client, conn, paper)
-                      except Exception:
-                          pass
+                      except Exception as _poll_err:
+                          logger.warning("[POLL_ERR] wallet=%s err=%r", wallet.get("address","?"), _poll_err)
 
                   conn.commit()
 
@@ -1077,10 +1079,10 @@ async def run_monitor(
                               )
                               try:
                                   alerts.send_telegram_sync(text)
-                              except Exception:
-                                  pass
-                      except Exception:
-                          pass
+                              except Exception as _poll_err:
+                                  logger.warning("[POLL_ERR] wallet=%s err=%r", wallet.get("address","?"), _poll_err)
+                      except Exception as _poll_err:
+                          logger.warning("[POLL_ERR] wallet=%s err=%r", wallet.get("address","?"), _poll_err)
                       next_maintenance_ts = now + MAINTENANCE_EVERY_SEC
 
 
@@ -1149,7 +1151,7 @@ def send_start_notice_once_per_hour() -> None:
         print("[telegram] start notice sending", file=sys.stderr)
         telegram_heartbeat("✅ Polymarket bot started (systemd) — heartbeat OK.")
         _start_notice_file.touch()
-    except Exception:
+    except Exception as _poll_err:
         pass
 
 if __name__ == "__main__":
